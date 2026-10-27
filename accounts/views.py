@@ -145,7 +145,6 @@ def send_otp_view(request):
     return Response({
         'message': f'OTP sent successfully to {identifier}',
         'identifier': identifier,
-        'code': otp_obj.code,
     }, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
