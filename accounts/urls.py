@@ -4,6 +4,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     register_view,
     login_view,
+    google_auth_view,
     admin_login_view,
     admin_customers_view,
     send_otp_view,
@@ -18,6 +19,7 @@ router.register('addresses', AddressViewSet, basename='address')
 urlpatterns = [
     path('register/', register_view, name='register'),
     path('login/', login_view, name='login'),
+    path('google/', google_auth_view, name='google_auth'),
     path('admin-login/', admin_login_view, name='admin_login'),
     path('admin/customers/', admin_customers_view, name='admin_customers'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

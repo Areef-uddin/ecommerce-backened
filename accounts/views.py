@@ -64,6 +64,44 @@ def login_view(request):
 
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
+def google_auth_view(request):
+    """
+    Authenticate or Register user dynamically using Google credentials
+    """
+    email = request.data.get('email', '').strip().lower()
+    full_name = request.data.get('name', '').strip()
+    avatar = request.data.get('avatar', '')
+
+    if not email:
+        return Response({'detail': 'Google email is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = User.objects.filter(email=email).first()
+    if not user:
+        name_parts = full_name.split(' ') if full_name else [email.split('@')[0]]
+        first_name = name_parts[0]
+        last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+        user = User.objects.create(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            avatar=avatar or 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400',
+            is_active=True
+        )
+        user.set_unusable_password()
+        user.save()
+    else:
+        if avatar and (not user.avatar or 'placeholder' in user.avatar):
+            user.avatar = avatar
+            user.save()
+
+    token_data = get_tokens_for_user(user)
+    return Response({
+        'message': 'Google authentication successful',
+        **token_data
+    }, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
 def admin_login_view(request):
     email = request.data.get('email', '').strip()
     password = request.data.get('password', '')
