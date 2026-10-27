@@ -3,6 +3,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
+from django.db.models import Q
 from .models import User, OTPVerification, Address
 from .serializers import UserSerializer, RegisterSerializer, AddressSerializer
 
@@ -158,7 +159,18 @@ def verify_otp_view(request):
     if not identifier or not code:
         return Response({'detail': 'Identifier and code are required'}, status=status.HTTP_400_BAD_REQUEST)
 
-    otp = OTPVerification.objects.filter(identifier=identifier, code=code).first()
+    # Normalize phone digits for flexible matching
+    digits = ''.join(filter(str.isdigit, identifier))
+    last10 = digits[-10:] if len(digits) >= 10 else digits
+
+    # Try matching OTP by raw identifier or normalized variants
+    otp = OTPVerification.objects.filter(
+        Q(identifier=identifier) |
+        Q(identifier=last10) |
+        Q(identifier=f"+91{last10}"),
+        code=code
+    ).order_by('-created_at').first()
+
     if not otp or not otp.is_valid():
         return Response({'detail': 'Invalid or expired OTP code'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -172,10 +184,27 @@ def verify_otp_view(request):
         if not user:
             user = User.objects.create_user(email=identifier, first_name='Shopper')
     else:
-        user = User.objects.filter(phone=identifier).first()
+        # Check by phone (full, 10-digit, with country code) or legacy placeholder email
+        user = User.objects.filter(
+            Q(phone=identifier) |
+            Q(phone=last10) |
+            Q(phone=f"+91{last10}") |
+            Q(email=f"user_{last10[-6:]}@stylehub.com")
+        ).first()
+
         if not user:
-            email_placeholder = f"user_{identifier[-6:]}@stylehub.com"
-            user = User.objects.create_user(email=email_placeholder, phone=identifier, first_name='Shopper')
+            email_placeholder = f"user_{last10[-6:]}@stylehub.com"
+            if User.objects.filter(email=email_placeholder).exists():
+                email_placeholder = f"user_{last10}_{int(timezone.now().timestamp())}@stylehub.com"
+            user = User.objects.create_user(
+                email=email_placeholder,
+                phone=f"+91{last10}",
+                first_name='Shopper'
+            )
+        else:
+            if not user.phone or user.phone != f"+91{last10}":
+                user.phone = f"+91{last10}"
+                user.save(update_fields=['phone'])
 
     token_data = get_tokens_for_user(user)
     return Response({
