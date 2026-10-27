@@ -142,9 +142,11 @@ def send_otp_view(request):
         return Response({'detail': 'Phone number or email is required'}, status=status.HTTP_400_BAD_REQUEST)
 
     otp_obj = OTPVerification.generate_otp(identifier)
+    print(f"[AUTH SMS SERVICE] OTP for {identifier}: {otp_obj.code}")
     return Response({
         'message': f'OTP sent successfully to {identifier}',
         'identifier': identifier,
+        'otp': otp_obj.code,
     }, status=status.HTTP_200_OK)
 
 @api_view(['POST'])

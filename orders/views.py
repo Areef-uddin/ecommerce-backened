@@ -159,7 +159,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             delivery_address=delivery_address,
             address_type=address_type,
             payment_method=payment_method,
-            payment_status='Paid' if payment_method != 'Cash on Delivery' else 'Pending',
+            payment_status='Pending' if payment_method in ['Cash on Delivery', 'COD'] else 'Paid',
             order_status='Placed',
             item_total=item_total,
             discount_amount=discount_amount,
@@ -232,7 +232,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             razorpay_order = client.order.create({
                 'amount': amount_in_paise,
                 'currency': 'INR',
-                'payment_capture': '1',
+                'payment_capture': 1,
                 'notes': {
                     'user_id': str(user.id),
                     'user_email': user.email,
@@ -246,6 +246,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 'total_amount': str(total_amount)
             })
         except Exception as e:
+            print(f"Razorpay order create error: {e}")
             # Fallback for simulator
             return Response({
                 'razorpay_order_id': f"order_sim_{int(timezone.now().timestamp())}",
@@ -275,8 +276,8 @@ class OrderViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 return Response({'detail': f'Signature verification failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Place the order with payment_method='Razorpay', payment_status='Paid'
-        request.data['payment_method'] = 'Razorpay'
+        # Place the order with payment_method, payment_status='Paid'
+        request.data['payment_method'] = request.data.get('payment_method', 'Razorpay')
         return self.create(request)
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
