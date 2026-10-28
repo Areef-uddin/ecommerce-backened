@@ -135,20 +135,37 @@ def admin_customers_view(request):
         })
     return Response(data)
 
+from .twilio_verify import send_twilio_verification, check_twilio_verification, format_e164
+
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def send_otp_view(request):
     identifier = request.data.get('identifier', '').strip()
+    channel = request.data.get('channel', 'sms')
     if not identifier:
         return Response({'detail': 'Phone number or email is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+    # 1. Always generate a local database OTP backup for simulator/demo resilience
     otp_obj = OTPVerification.generate_otp(identifier)
-    print(f"[AUTH SMS SERVICE] OTP for {identifier}: {otp_obj.code}")
-    return Response({
-        'message': f'OTP sent successfully to {identifier}',
+
+    # 2. If identifier is a phone number, dispatch real SMS via Twilio Verify v2
+    twilio_response = None
+    if '@' not in identifier:
+        e164_phone = format_e164(identifier)
+        twilio_response = send_twilio_verification(e164_phone, channel=channel)
+        print(f"[Twilio Verify v2] Sending verification to {e164_phone} via channel '{channel}' -> {twilio_response}")
+
+    print(f"[AUTH OTP SERVICE] Active OTP for {identifier}: {otp_obj.code}")
+
+    response_payload = {
+        'message': f'Verification code sent successfully to {identifier}',
         'identifier': identifier,
-        'otp': otp_obj.code,
-    }, status=status.HTTP_200_OK)
+        'otp': otp_obj.code, # Included for instant developer/simulator testing
+    }
+    if twilio_response:
+        response_payload['twilio'] = twilio_response
+
+    return Response(response_payload, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
@@ -163,19 +180,34 @@ def verify_otp_view(request):
     digits = ''.join(filter(str.isdigit, identifier))
     last10 = digits[-10:] if len(digits) >= 10 else digits
 
-    # Try matching OTP by raw identifier or normalized variants
-    otp = OTPVerification.objects.filter(
-        Q(identifier=identifier) |
-        Q(identifier=last10) |
-        Q(identifier=f"+91{last10}"),
-        code=code
-    ).order_by('-created_at').first()
+    # 1. Attempt Twilio Verify v2 check first if it's a phone number
+    is_verified = False
+    verification_source = 'local'
+    if '@' not in identifier:
+        e164_phone = format_e164(identifier)
+        twilio_check = check_twilio_verification(e164_phone, code)
+        if twilio_check.get('valid'):
+            is_verified = True
+            verification_source = 'twilio_verify_v2'
+            print(f"[Twilio Verify v2] OTP code verified successfully for {e164_phone}!")
 
-    if not otp or not otp.is_valid():
-        return Response({'detail': 'Invalid or expired OTP code'}, status=status.HTTP_400_BAD_REQUEST)
+    # 2. If not verified via Twilio, verify against local OTP record
+    if not is_verified:
+        otp = OTPVerification.objects.filter(
+            Q(identifier=identifier) |
+            Q(identifier=last10) |
+            Q(identifier=f"+91{last10}"),
+            code=code
+        ).order_by('-created_at').first()
 
-    otp.is_verified = True
-    otp.save()
+        if otp and otp.is_valid():
+            otp.is_verified = True
+            otp.save()
+            is_verified = True
+            verification_source = 'local_otp'
+
+    if not is_verified:
+        return Response({'detail': 'Invalid or expired verification code'}, status=status.HTTP_400_BAD_REQUEST)
 
     # Find or create user with this identifier
     user = None
@@ -208,23 +240,96 @@ def verify_otp_view(request):
 
     token_data = get_tokens_for_user(user)
     return Response({
-        'message': 'OTP verified successfully',
+        'message': f'Verification successful ({verification_source})',
         **token_data
     }, status=status.HTTP_200_OK)
 
 @api_view(['GET', 'PUT', 'PATCH'])
 @permission_classes([permissions.IsAuthenticated])
 def profile_view(request):
+    import base64
+    import os
+    import time
+    from django.conf import settings
+
     user = request.user
     if request.method == 'GET':
         serializer = UserSerializer(user)
         return Response(serializer.data)
     
-    serializer = UserSerializer(user, data=request.data, partial=True)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(serializer.data)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+
+    # 1. Handle avatar file upload or base64 image data
+    if 'avatar' in request.FILES:
+        try:
+            avatar_file = request.FILES['avatar']
+            avatar_dir = os.path.join(settings.MEDIA_ROOT, 'avatars')
+            os.makedirs(avatar_dir, exist_ok=True)
+            ext = os.path.splitext(avatar_file.name)[1] or '.png'
+            filename = f'user_{user.id}_{int(time.time())}{ext}'
+            filepath = os.path.join(avatar_dir, filename)
+            with open(filepath, 'wb+') as dest:
+                for chunk in avatar_file.chunks():
+                    dest.write(chunk)
+            user.avatar = request.build_absolute_uri(f'{settings.MEDIA_URL}avatars/{filename}')
+        except Exception as e:
+            print(f"Error saving avatar file: {e}")
+    elif 'avatar' in data and str(data['avatar']).startswith('data:image'):
+        try:
+            raw_data = str(data['avatar'])
+            header, b64_data = raw_data.split(';base64,', 1)
+            ext = '.png'
+            if 'jpeg' in header or 'jpg' in header:
+                ext = '.jpg'
+            elif 'webp' in header:
+                ext = '.webp'
+            avatar_dir = os.path.join(settings.MEDIA_ROOT, 'avatars')
+            os.makedirs(avatar_dir, exist_ok=True)
+            filename = f'user_{user.id}_{int(time.time())}{ext}'
+            filepath = os.path.join(avatar_dir, filename)
+            with open(filepath, 'wb') as dest:
+                dest.write(base64.b64decode(b64_data))
+            user.avatar = request.build_absolute_uri(f'{settings.MEDIA_URL}avatars/{filename}')
+        except Exception as e:
+            print(f"Error decoding base64 avatar: {e}")
+    elif 'avatar' in data and str(data['avatar']).strip():
+        user.avatar = str(data['avatar']).strip()
+
+    # 2. Handle Name
+    if 'full_name' in data:
+        full_name = str(data.get('full_name', '')).strip()
+        if full_name:
+            parts = full_name.split(' ', 1)
+            user.first_name = parts[0]
+            user.last_name = parts[1] if len(parts) > 1 else ''
+        else:
+            user.first_name = ''
+            user.last_name = ''
+    elif 'first_name' in data or 'last_name' in data:
+        if 'first_name' in data:
+            user.first_name = str(data['first_name']).strip()
+        if 'last_name' in data:
+            user.last_name = str(data['last_name']).strip()
+
+    # 3. Handle Email
+    if 'email' in data:
+        new_email = str(data['email']).strip().lower()
+        if new_email and new_email != user.email:
+            if User.objects.filter(email__iexact=new_email).exclude(id=user.id).exists():
+                return Response({'email': ['This email is already in use by another account.']}, status=status.HTTP_400_BAD_REQUEST)
+            user.email = new_email
+
+    # 4. Handle Phone
+    if 'phone' in data:
+        new_phone = str(data['phone']).strip()
+        if new_phone and new_phone != user.phone:
+            if User.objects.filter(phone=new_phone).exclude(id=user.id).exists():
+                return Response({'phone': ['This phone number is already registered to another account.']}, status=status.HTTP_400_BAD_REQUEST)
+            user.phone = new_phone
+
+    user.save()
+    serializer = UserSerializer(user)
+    return Response(serializer.data, status=status.HTTP_200_OK)
 
 class AddressViewSet(viewsets.ModelViewSet):
     serializer_class = AddressSerializer

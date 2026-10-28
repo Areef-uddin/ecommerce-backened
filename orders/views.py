@@ -5,8 +5,9 @@ from decimal import Decimal
 from django.utils import timezone
 from django.conf import settings
 import razorpay
-from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest
-from .serializers import CartItemSerializer, OrderSerializer, ReturnRequestSerializer
+from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
+from .serializers import CartItemSerializer, OrderSerializer, ReturnRequestSerializer, ShipmentTrackingSerializer
+from .courier import get_courier_provider
 from products.models import Product
 from accounts.models import Address
 
@@ -103,14 +104,14 @@ class OrderViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.is_staff:
-            qs = Order.objects.all().prefetch_related('items', 'timeline')
+            qs = Order.objects.all().prefetch_related('items', 'timeline', 'shipment__milestones')
         else:
-            qs = Order.objects.filter(user=user).prefetch_related('items', 'timeline')
+            qs = Order.objects.filter(user=user).prefetch_related('items', 'timeline', 'shipment__milestones')
 
         order_status = self.request.query_params.get('status')
         if order_status and order_status.lower() != 'all':
             if order_status.lower() == 'processing':
-                qs = qs.filter(order_status__in=['Placed', 'Packed'])
+                qs = qs.filter(order_status__in=['Placed', 'Order Placed', 'Confirmed', 'Packed'])
             else:
                 qs = qs.filter(order_status__iexact=order_status)
 
@@ -183,22 +184,9 @@ class OrderViewSet(viewsets.ModelViewSet):
                 image_url=img_url
             )
 
-        # Create Timeline steps matching screen 14 & 16
-        steps = [
-            ('Order Placed', '28 Oct, 10:24 AM', True, 0),
-            ('Packed', '29 Oct, 11:00 AM', False, 1),
-            ('Shipped', '30 Oct, 08:20 AM', False, 2),
-            ('Out for Delivery', 'Expected 31 Oct', False, 3),
-            ('Delivered', 'Expected 31 Oct', False, 4),
-        ]
-        for step, d_text, is_comp, idx in steps:
-            OrderTimeline.objects.create(
-                order=order,
-                status_step=step,
-                date_text=d_text,
-                is_completed=is_comp,
-                order_index=idx
-            )
+        # Initialize Tracking Record and 7 Milestones via Courier Provider
+        courier_provider = get_courier_provider()
+        courier_provider.create_shipment(order)
 
         # Clear cart
         cart_items.delete()
@@ -264,8 +252,32 @@ class OrderViewSet(viewsets.ModelViewSet):
         razorpay_order_id = request.data.get('razorpay_order_id', '')
         razorpay_signature = request.data.get('razorpay_signature', '')
 
-        # Verify signature if real
-        if razorpay_signature and not str(razorpay_order_id).startswith('order_sim_'):
+        is_paid = False
+
+        # 1. Direct Razorpay Payment Fetch Verification
+        if razorpay_payment_id and not str(razorpay_order_id).startswith('order_sim_'):
+            try:
+                client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+                pay = client.payment.fetch(razorpay_payment_id)
+                if pay.get('status') in ['captured', 'authorized']:
+                    is_paid = True
+                    print(f"[Razorpay Verify] Payment {razorpay_payment_id} verified as {pay.get('status')}!")
+            except Exception as e:
+                print(f"[Razorpay Fetch Payment Error]: {e}")
+
+        # 2. Direct Razorpay Server Order Status
+        if not is_paid and razorpay_order_id and not str(razorpay_order_id).startswith('order_sim_'):
+            try:
+                client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+                rz_order = client.order.fetch(razorpay_order_id)
+                if rz_order.get('status') == 'paid':
+                    is_paid = True
+                    print(f"[Razorpay Verify] Order {razorpay_order_id} verified as PAID via Razorpay server!")
+            except Exception as e:
+                print(f"[Razorpay Fetch Order Error]: {e}")
+
+        # 2. Signature verification fallback
+        if not is_paid and razorpay_signature and not str(razorpay_order_id).startswith('order_sim_'):
             try:
                 client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
                 client.utility.verify_payment_signature({
@@ -273,35 +285,119 @@ class OrderViewSet(viewsets.ModelViewSet):
                     'razorpay_payment_id': razorpay_payment_id,
                     'razorpay_signature': razorpay_signature
                 })
+                is_paid = True
+                print(f"[Razorpay Verify] Signature verified successfully for {razorpay_order_id}!")
             except Exception as e:
-                return Response({'detail': f'Signature verification failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+                print(f"[Razorpay Signature Verification Error]: {e}")
+
+        # 3. Simulator fallback
+        if str(razorpay_order_id).startswith('order_sim_'):
+            is_paid = True
+
+        if not is_paid:
+            return Response({'detail': 'Payment could not be verified with Razorpay.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Place the order with payment_method, payment_status='Paid'
-        request.data['payment_method'] = request.data.get('payment_method', 'Razorpay')
+        try:
+            request.data['payment_method'] = request.data.get('payment_method', 'Razorpay')
+        except Exception:
+            pass
         return self.create(request)
+
+    @action(detail=True, methods=['get'])
+    def tracking(self, request, pk=None):
+        """
+        Retrieve tracking info and 7-stage milestones.
+        Customers can only view their own orders; staff/admins can view any order.
+        """
+        order = self.get_object()
+        if not request.user.is_staff and order.user != request.user:
+            return Response(
+                {'detail': 'You do not have permission to view tracking for this order.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        provider = get_courier_provider()
+        if not hasattr(order, 'shipment') or not order.shipment:
+            provider.create_shipment(order)
+            order.refresh_from_db()
+
+        tracking_data = provider.get_tracking_info(order.shipment.tracking_number)
+        return Response(tracking_data)
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
     def update_status(self, request, pk=None):
+        """
+        Admin status update endpoint. Synchronizes Order and ShipmentTracking milestones.
+        """
         order = self.get_object()
         new_status = request.data.get('status')
+        location = request.data.get('location', '')
+        note = request.data.get('note', '')
+
         if not new_status:
             return Response({'detail': 'status is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        order.order_status = new_status
-        order.save()
+        # Mapping legacy status names if passed
+        status_alias_map = {
+            'Placed': 'Order Placed',
+            'Shipped': 'In Transit',
+        }
+        mapped_status = status_alias_map.get(new_status, new_status)
 
-        # Update timeline step completions
-        steps_order = ['Placed', 'Packed', 'Shipped', 'Out for Delivery', 'Delivered']
-        if new_status in steps_order:
-            curr_index = steps_order.index(new_status)
-            for tl in order.timeline.all():
-                if tl.order_index <= curr_index:
-                    tl.is_completed = True
-                else:
-                    tl.is_completed = False
-                tl.save()
+        provider = get_courier_provider()
+        if not hasattr(order, 'shipment') or not order.shipment:
+            provider.create_shipment(order)
+            order.refresh_from_db()
 
-        return Response({'message': f'Status updated to {new_status}', 'order': self.get_serializer(order).data})
+        try:
+            shipment = provider.update_status(
+                order.shipment.tracking_number,
+                mapped_status,
+                location=location,
+                note=note
+            )
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        order.refresh_from_db()
+        return Response({
+            'message': f'Status updated to {mapped_status}',
+            'order': self.get_serializer(order).data,
+            'tracking': provider.get_tracking_info(shipment.tracking_number)
+        })
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    def simulate_tracking(self, request, pk=None):
+        """
+        DEMO TRACKING Simulation endpoint.
+        Allows authorized admin to simulate status changes with custom locations and notes.
+        """
+        return self.update_status(request, pk=pk)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    def reset_demo_tracking(self, request, pk=None):
+        """
+        Reset tracking to 'Order Placed' for demo purposes.
+        """
+        order = self.get_object()
+        provider = get_courier_provider()
+        if not hasattr(order, 'shipment') or not order.shipment:
+            provider.create_shipment(order)
+            order.refresh_from_db()
+
+        shipment = provider.update_status(
+            order.shipment.tracking_number,
+            'Order Placed',
+            location='Bengaluru Fulfillment Center',
+            note='Simulation reset to Order Placed.'
+        )
+        order.refresh_from_db()
+        return Response({
+            'message': 'Demo tracking reset to Order Placed',
+            'order': self.get_serializer(order).data,
+            'tracking': provider.get_tracking_info(shipment.tracking_number)
+        })
 
 
 class ReturnRequestViewSet(viewsets.ModelViewSet):
