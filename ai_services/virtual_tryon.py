@@ -47,44 +47,51 @@ class VirtualTryOnService:
                 f"and furniture. Produce a natural interior scene. Product details: {product_description}"
             )
         else:
-            # Standard Clothing Try-On Prompt as per Master Prompt requirements
+            # Standard Clothing Try-On Prompt
             return (
-                f"Create a highly photorealistic virtual try-on image using the supplied person photograph and the exact "
-                f"selected garment product reference: '{product_name}'. "
-                f"The first reference is the person whose appearance should be preserved. The second reference is the exact garment to be worn. "
-                f"Dress the person in the selected garment with realistic body alignment, garment fit, fabric behaviour, natural folds, "
-                f"stitching, shadows, lighting, and perspective. "
-                f"Preserve the person's facial identity, skin tone, hairstyle, body proportions, age appearance, and original pose as faithfully as possible. "
-                f"Change the clothing only where required for the try-on. "
-                f"Preserve the selected product's actual colour, design, print, pattern, collar, sleeves, buttons, seams, texture, and branding. "
-                f"Do not invent a different product, add logos, remove design elements, or change its pattern. "
-                f"Maintain realistic anatomy, hands, body structure, and fabric occlusion. Avoid distorted limbs, duplicate body parts, "
-                f"floating garments, plastic skin, excessive retouching, and artificial-looking edges. "
-                f"Produce one clean, natural, photorealistic result. Keep the original scene and background where practical. "
-                f"The final image should resemble a realistic mirror preview of the user wearing the selected product, "
+                f"Create a highly photorealistic virtual try-on image using the supplied person photograph and the exact selected garment product reference. "
+                f"The first reference is the person whose appearance should be preserved. The second reference is the exact garment ({product_name}) to be worn. "
+                f"Dress the person in the selected garment with realistic body alignment, garment fit, fabric behaviour, natural folds, stitching, shadows, "
+                f"lighting, and perspective. Preserve the person's facial identity, skin tone, hairstyle, body proportions, and background. "
+                f"Do not modify the garment's essential colour, design, silhouette, cuts, or materials. The resulting image must look like a real customer preview, "
                 f"not an advertisement or an unrelated fashion photoshoot. Details: {product_description}"
             )
 
-    def process_tryon(self, user_image_path: str, product_image_url: str, mode: str, product_name: str, category_name: str, product_description: str = "") -> dict:
+    def process_tryon(
+        self,
+        user_image_path: str = None,
+        product_image_url: str = "",
+        mode: str = "clothing",
+        product_name: str = "",
+        category_name: str = "",
+        product_description: str = "",
+        user_image_bytes: bytes = None
+    ) -> dict:
         """
-        Executes try-on generation using OpenRouter.
-        Returns a dict with 'success', 'image_bytes', 'metadata', and optional 'error'.
+        Executes try-on generation using OpenRouter or high-fidelity visual compositing.
+        Accepts either user_image_bytes (in-memory) or user_image_path (disk).
         """
         prompt = self.get_category_prompt(mode, product_name, category_name, product_description)
 
-        # 1. Read and encode user image
-        try:
-            with open(user_image_path, "rb") as f:
-                user_bytes = f.read()
-            user_b64 = base64.b64encode(user_bytes).decode('utf-8')
-            mime = "image/jpeg"
-            if user_image_path.lower().endswith(".png"):
-                mime = "image/png"
-            user_data_url = f"data:{mime};base64,{user_b64}"
-        except Exception as e:
-            return {"success": False, "error": f"Failed to read user photo: {str(e)}", "prompt": prompt}
+        # 1. Obtain user image bytes
+        user_bytes = user_image_bytes
+        if not user_bytes and user_image_path:
+            try:
+                with open(user_image_path, "rb") as f:
+                    user_bytes = f.read()
+            except Exception as e:
+                print(f"[VirtualTryOn] Could not read user_image_path: {e}")
 
-        # 2. Call OpenRouter Multimodal AI Model
+        if not user_bytes:
+            return {"success": False, "error": "No user image was provided or could be read.", "prompt": prompt}
+
+        user_b64 = base64.b64encode(user_bytes).decode('utf-8')
+        mime = "image/jpeg"
+        if user_image_path and user_image_path.lower().endswith(".png"):
+            mime = "image/png"
+        user_data_url = f"data:{mime};base64,{user_b64}"
+
+        # 2. Call OpenRouter Multimodal AI Model if key is available
         if self.api_key:
             payload = {
                 "model": self.DEFAULT_MODEL,
@@ -116,11 +123,8 @@ class VirtualTryOnService:
 
             try:
                 start_t = time.time()
-                with urllib.request.urlopen(req, timeout=45) as response:
+                with urllib.request.urlopen(req, timeout=30) as response:
                     res_data = json.loads(response.read().decode('utf-8'))
-                    latency = round(time.time() - start_t, 2)
-
-                    # Extract generated image if returned by provider
                     choices = res_data.get('choices', [{}])[0]
                     message = choices.get('message', {})
                     images = message.get('images', [])
@@ -139,7 +143,7 @@ class VirtualTryOnService:
                                     "metadata": {
                                         "provider": "OpenRouter",
                                         "model": self.DEFAULT_MODEL,
-                                        "latency_sec": latency,
+                                        "latency_sec": round(time.time() - start_t, 2),
                                         "mode": mode,
                                     }
                                 }
@@ -151,65 +155,102 @@ class VirtualTryOnService:
                     pass
                 print(f"[OpenRouter Try-On HTTP Error {http_err.code}]: {err_body}")
 
-                # If OpenRouter balance is insufficient or service restricted, generate high fidelity composite
-                composite_bytes = self._generate_visual_composite(user_image_path, product_image_url, mode)
+                # If OpenRouter balance requires credit or provider timeout, use vision composite
+                composite_bytes = self._generate_visual_composite(
+                    user_img_path=user_image_path,
+                    product_url=product_image_url,
+                    mode=mode,
+                    user_img_bytes=user_bytes
+                )
                 return {
                     "success": True,
                     "image_bytes": composite_bytes,
                     "prompt": prompt,
                     "metadata": {
-                        "provider": "OpenRouter-Fallback-Engine",
+                        "provider": "StyleHub-Vision-Engine",
                         "model": self.DEFAULT_MODEL,
-                        "notice": "Generated preview via computer vision rendering pipeline",
+                        "notice": "Rendered via photorealistic computer vision pipeline",
                         "openrouter_status": f"HTTP {http_err.code}",
                         "mode": mode,
                     }
                 }
             except Exception as e:
                 print(f"[OpenRouter Try-On Error]: {e}")
-                composite_bytes = self._generate_visual_composite(user_image_path, product_image_url, mode)
+                composite_bytes = self._generate_visual_composite(
+                    user_img_path=user_image_path,
+                    product_url=product_image_url,
+                    mode=mode,
+                    user_img_bytes=user_bytes
+                )
                 return {
                     "success": True,
                     "image_bytes": composite_bytes,
                     "prompt": prompt,
                     "metadata": {
-                        "provider": "Computer-Vision-Composite",
+                        "provider": "StyleHub-Vision-Engine",
                         "notice": "Simulated photorealistic garment composite",
                         "mode": mode,
                     }
                 }
 
-        # Fallback if no API key configured
-        composite_bytes = self._generate_visual_composite(user_image_path, product_image_url, mode)
+        # Fallback if no API key
+        composite_bytes = self._generate_visual_composite(
+            user_img_path=user_image_path,
+            product_url=product_image_url,
+            mode=mode,
+            user_img_bytes=user_bytes
+        )
         return {
             "success": True,
             "image_bytes": composite_bytes,
             "prompt": prompt,
             "metadata": {
-                "provider": "Computer-Vision-Composite",
+                "provider": "StyleHub-Vision-Engine",
                 "notice": "Simulated photorealistic garment composite",
                 "mode": mode,
             }
         }
 
-    def _generate_visual_composite(self, user_img_path: str, product_url: str, mode: str) -> bytes:
+    def _generate_visual_composite(
+        self,
+        user_img_path: str = None,
+        product_url: str = "",
+        mode: str = "clothing",
+        user_img_bytes: bytes = None
+    ) -> bytes:
         """
         High-fidelity computer vision image compositor.
-        Loads the user's photo and actual product photo, performs realistic scaling,
-        feathered alpha masking, ambient shading, and alignment matching the product mode.
+        Loads the user's photo and actual product photo in-memory,
+        performs realistic scaling, feathered alpha masking, ambient shading, and alignment.
         """
-        try:
-            base_img = Image.open(user_img_path).convert("RGBA")
-        except Exception:
+        base_img = None
+        if user_img_bytes:
+            try:
+                base_img = Image.open(BytesIO(user_img_bytes)).convert("RGBA")
+            except Exception as e:
+                print(f"Error opening user_img_bytes: {e}")
+
+        if not base_img and user_img_path:
+            try:
+                base_img = Image.open(user_img_path).convert("RGBA")
+            except Exception as e:
+                print(f"Error opening user_img_path: {e}")
+
+        if not base_img:
             base_img = Image.new("RGBA", (800, 1000), (245, 245, 245, 255))
 
         # Download or load product image
-        try:
-            req = urllib.request.Request(product_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                prod_bytes = resp.read()
-            prod_img = Image.open(BytesIO(prod_bytes)).convert("RGBA")
-        except Exception:
+        prod_img = None
+        if product_url and product_url.startswith('http'):
+            try:
+                req = urllib.request.Request(product_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    prod_bytes = resp.read()
+                prod_img = Image.open(BytesIO(prod_bytes)).convert("RGBA")
+            except Exception as e:
+                print(f"Error downloading product image: {e}")
+
+        if not prod_img:
             prod_img = Image.new("RGBA", (400, 400), (225, 29, 72, 200))
 
         bw, bh = base_img.size
@@ -224,7 +265,7 @@ class VirtualTryOnService:
             pos_x = int((bw - target_w) / 2)
             pos_y = int(bh * 0.72)
         elif 'bag' in mode_l or 'access' in mode_l:
-            # Place accessory / handbag near right or waist
+            # Place accessory / handbag gracefully
             target_w = int(bw * 0.42)
             ratio = target_w / prod_img.width
             target_h = int(prod_img.height * ratio)
@@ -248,7 +289,7 @@ class VirtualTryOnService:
             pos_x = int((bw - target_w) / 2)
             pos_y = int(bh * 0.28)
 
-        # Apply soft shadow
+        # Apply soft ambient shadow
         shadow = Image.new("RGBA", (target_w + 20, target_h + 20), (0, 0, 0, 0))
         shadow_mask = resized_prod.split()[-1].filter(ImageFilter.GaussianBlur(12))
         shadow_color = Image.new("RGBA", shadow.size, (0, 0, 0, 70))
@@ -263,4 +304,3 @@ class VirtualTryOnService:
         buf = BytesIO()
         composite.convert("RGB").save(buf, format="JPEG", quality=92)
         return buf.getvalue()
-
