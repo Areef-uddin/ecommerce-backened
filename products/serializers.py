@@ -14,7 +14,7 @@ class SubCategorySerializer(serializers.ModelSerializer):
         ret = super().to_representation(instance)
         url = ret.get('image_url')
         if url and (url.startswith('/media/') or url.startswith('media/')):
-            ret['image_url'] = f"http://127.0.0.1:8000/{url.lstrip('/')}"
+            ret['image_url'] = f"https://ecommerce-backened-jsiy.onrender.com/{url.lstrip('/')}"
         return ret
 
     def create(self, validated_data):
@@ -75,7 +75,7 @@ class CategorySerializer(serializers.ModelSerializer):
         ret = super().to_representation(instance)
         url = ret.get('image_url')
         if url and (url.startswith('/media/') or url.startswith('media/')):
-            ret['image_url'] = f"http://127.0.0.1:8000/{url.lstrip('/')}"
+            ret['image_url'] = f"https://ecommerce-backened-jsiy.onrender.com/{url.lstrip('/')}"
         return ret
 
     def create(self, validated_data):
@@ -164,7 +164,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             request = self.context.get('request')
             if request:
                 return request.build_absolute_uri('/' + url.lstrip('/'))
-            return f"http://127.0.0.1:8000/{url.lstrip('/')}"
+            return f"https://ecommerce-backened-jsiy.onrender.com/{url.lstrip('/')}"
         return url
 
     def get_is_wishlisted(self, obj):
