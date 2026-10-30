@@ -1,5 +1,7 @@
 from rest_framework import serializers
-from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ShipmentTracking, TrackingMilestone
+from datetime import timedelta
+from django.utils import timezone
+from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ReturnTimeline, ShipmentTracking, TrackingMilestone
 from products.serializers import ProductListSerializer
 
 class CartItemSerializer(serializers.ModelSerializer):
@@ -59,9 +61,51 @@ class ShipmentTrackingSerializer(serializers.ModelSerializer):
         }
 
 
+class ReturnTimelineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReturnTimeline
+        fields = ('id', 'status', 'note', 'created_at')
+
+
+class ReturnRequestSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='order_item.product_name', read_only=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    customer_name = serializers.CharField(source='order.customer_name', read_only=True)
+    payment_method = serializers.CharField(source='order.payment_method', read_only=True)
+    timeline = ReturnTimelineSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ReturnRequest
+        fields = ('id', 'order', 'order_number', 'customer_name', 'payment_method', 'order_item', 'product_name', 'reason', 'pickup_type', 'status', 'refund_amount', 'created_at', 'timeline')
+        read_only_fields = ('id', 'created_at', 'status', 'refund_amount')
+
+
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     timeline = OrderTimelineSerializer(many=True, read_only=True)
+    returns = ReturnRequestSerializer(many=True, read_only=True)
+    return_eligible = serializers.SerializerMethodField()
+    return_window_ends_at = serializers.SerializerMethodField()
+
+    def _return_deadline(self, obj):
+        delivered_at = obj.updated_at
+        try:
+            delivered_milestone = obj.shipment.milestones.filter(
+                status_step='Delivered', is_completed=True,
+            ).first()
+            if delivered_milestone and delivered_milestone.timestamp:
+                delivered_at = delivered_milestone.timestamp
+        except Exception:
+            pass
+        return delivered_at + timedelta(days=7)
+
+    def get_return_eligible(self, obj):
+        return obj.order_status == 'Delivered' and self._return_deadline(obj) >= timezone.now()
+
+    def get_return_window_ends_at(self, obj):
+        if obj.order_status != 'Delivered':
+            return None
+        return self._return_deadline(obj)
     tracking_number = serializers.ReadOnlyField()
     shipment = ShipmentTrackingSerializer(read_only=True)
 
@@ -73,18 +117,6 @@ class OrderSerializer(serializers.ModelSerializer):
             'item_total', 'discount_amount', 'delivery_charges', 'total_amount',
             'delivery_partner_name', 'delivery_partner_phone', 'delivery_partner_rating',
             'delivery_partner_vehicle', 'estimated_delivery', 'created_at', 'updated_at',
-            'items', 'timeline', 'shipment'
+            'items', 'timeline', 'shipment', 'returns', 'return_eligible', 'return_window_ends_at'
         )
         read_only_fields = ('id', 'order_number', 'tracking_number', 'user', 'created_at', 'updated_at')
-
-
-class ReturnRequestSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='order_item.product_name', read_only=True)
-    order_number = serializers.CharField(source='order.order_number', read_only=True)
-    customer_name = serializers.CharField(source='order.customer_name', read_only=True)
-    payment_method = serializers.CharField(source='order.payment_method', read_only=True)
-
-    class Meta:
-        model = ReturnRequest
-        fields = ('id', 'order', 'order_number', 'customer_name', 'payment_method', 'order_item', 'product_name', 'reason', 'pickup_type', 'status', 'refund_amount', 'created_at')
-        read_only_fields = ('id', 'created_at', 'status', 'refund_amount')

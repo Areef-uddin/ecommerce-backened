@@ -158,6 +158,19 @@ class ReturnRequest(models.Model):
         return f"Return for {self.order.order_number} - {self.order_item.product_name}"
 
 
+class ReturnTimeline(models.Model):
+    return_request = models.ForeignKey(ReturnRequest, on_delete=models.CASCADE, related_name='timeline')
+    status = models.CharField(max_length=30, choices=ReturnRequest.STATUS_CHOICES)
+    note = models.CharField(max_length=240, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+
+    def __str__(self):
+        return f"Return #{self.return_request_id} - {self.status}"
+
+
 TRACKING_STAGES_CONFIG = [
     {
         'status': 'Order Placed',

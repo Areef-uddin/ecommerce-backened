@@ -7,7 +7,8 @@ from django.utils import timezone
 from django.conf import settings
 from django.db import transaction
 import razorpay
-from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
+from common.models import Notification
+from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ReturnTimeline, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
 from .serializers import CartItemSerializer, OrderSerializer, ReturnRequestSerializer, ShipmentTrackingSerializer
 from .courier import get_courier_provider
 from products.models import Product
@@ -108,9 +109,9 @@ class OrderViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.is_staff:
-            qs = Order.objects.all().prefetch_related('items', 'timeline', 'shipment__milestones')
+            qs = Order.objects.all().prefetch_related('items', 'timeline', 'shipment__milestones', 'returns__timeline')
         else:
-            qs = Order.objects.filter(user=user).prefetch_related('items', 'timeline', 'shipment__milestones')
+            qs = Order.objects.filter(user=user).prefetch_related('items', 'timeline', 'shipment__milestones', 'returns__timeline')
 
         order_status = self.request.query_params.get('status')
         if order_status and order_status.lower() != 'all':
@@ -566,14 +567,19 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         if self.request.user.is_staff:
-            return ReturnRequest.objects.all().select_related('order', 'order_item')
-        return ReturnRequest.objects.filter(order__user=self.request.user).select_related('order', 'order_item')
+            return ReturnRequest.objects.all().select_related('order', 'order_item').prefetch_related('timeline')
+        return ReturnRequest.objects.filter(order__user=self.request.user).select_related('order', 'order_item').prefetch_related('timeline')
 
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         order_id = request.data.get('order_id')
         order_item_id = request.data.get('order_item_id')
         reason = request.data.get('reason', 'Size does not fit')
         pickup_type = request.data.get('pickup_type', 'Pickup')
+        if pickup_type not in ['Pickup', 'Drop at Store', 'Drop']:
+            return Response({'detail': 'Choose Pickup or Drop at Store.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 200:
+            return Response({'detail': 'Choose a reason for the return.'}, status=status.HTTP_400_BAD_REQUEST)
 
         order = Order.objects.filter(id=order_id, user=request.user).first()
         if not order:
@@ -593,12 +599,11 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
         if delivered_at < timezone.now() - timedelta(days=7):
             return Response({'detail': 'The 7-day return window for this order has expired.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        order_item = OrderItem.objects.filter(id=order_item_id, order=order).first()
+        if not order_item_id:
+            return Response({'detail': 'Choose the item you want to return.'}, status=status.HTTP_400_BAD_REQUEST)
+        order_item = OrderItem.objects.select_for_update().filter(id=order_item_id, order=order).first()
         if not order_item:
-            # Fallback to first item if not provided
-            order_item = order.items.first()
-            if not order_item:
-                return Response({'detail': 'Order item not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'detail': 'Order item not found'}, status=status.HTTP_404_NOT_FOUND)
 
         if order_item.return_requests.exclude(status='Rejected').exists():
             return Response({'detail': 'A return has already been requested for this item.'}, status=status.HTTP_409_CONFLICT)
@@ -613,10 +618,22 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
         return_obj = ReturnRequest.objects.create(
             order=order,
             order_item=order_item,
-            reason=reason,
+            reason=reason.strip(),
             pickup_type=pickup_type,
             status='Initiated',
             refund_amount=refund_amount
+        )
+        ReturnTimeline.objects.create(
+            return_request=return_obj,
+            status='Initiated',
+            note='Return request submitted by customer.',
+        )
+        Notification.objects.create(
+            user=order.user,
+            title='Return request received',
+            message=f'Return for {order_item.product_name} is under review. We will update you as it progresses.',
+            category='orders',
+            icon='rotate-ccw',
         )
         serializer = self.get_serializer(return_obj)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -624,7 +641,9 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
     @transaction.atomic
     def update_status(self, request, pk=None):
-        return_request = self.get_object()
+        return_request = self.get_queryset().select_for_update().filter(pk=pk).first()
+        if return_request is None:
+            return Response({'detail': 'Return request not found.'}, status=status.HTTP_404_NOT_FOUND)
         new_status = request.data.get('status')
         allowed = ['Pickup Scheduled', 'Pickup Received', 'Refund Processed', 'Rejected']
         if new_status not in allowed:
@@ -665,6 +684,24 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
 
         return_request.status = new_status
         return_request.save(update_fields=['status'])
+        status_notes = {
+            'Pickup Scheduled': 'Pickup has been scheduled for your return.',
+            'Pickup Received': 'The returned item has been received and is being checked.',
+            'Refund Processed': f'Refund of ₹{return_request.refund_amount} has been processed.',
+            'Rejected': 'The return request was rejected. Contact support if you need help.',
+        }
+        ReturnTimeline.objects.create(
+            return_request=return_request,
+            status=new_status,
+            note=status_notes[new_status],
+        )
+        Notification.objects.create(
+            user=order.user,
+            title=f'Return update: {new_status}',
+            message=f'{return_request.order_item.product_name}: {status_notes[new_status]}',
+            category='orders',
+            icon='rotate-ccw',
+        )
         if new_status == 'Refund Processed':
             refunded = sum(
                 (r.refund_amount for r in order.returns.filter(status='Refund Processed')),

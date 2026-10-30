@@ -4,7 +4,8 @@ from unittest.mock import patch
 from rest_framework.test import APIClient
 from rest_framework import status
 from django.test import override_settings
-from .models import CartItem, Order, OrderItem, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
+from .models import CartItem, Order, OrderItem, ReturnTimeline, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
+from common.models import Notification
 from .courier import get_courier_provider
 from products.models import Category, Product
 
@@ -232,6 +233,13 @@ class CourierTrackingSystemTestCase(TestCase):
         self.provider.update_status(shipment.tracking_number, 'Delivered')
 
         self.client.force_authenticate(user=self.customer1)
+        missing_item = self.client.post('/api/orders/returns/', {
+            'order_id': order.id,
+            'reason': 'Defective',
+            'pickup_type': 'Pickup',
+        }, format='json')
+        self.assertEqual(missing_item.status_code, status.HTTP_400_BAD_REQUEST)
+
         created = self.client.post('/api/orders/returns/', {
             'order_id': order.id,
             'order_item_id': item.id,
@@ -240,6 +248,11 @@ class CourierTrackingSystemTestCase(TestCase):
         }, format='json')
         self.assertEqual(created.status_code, status.HTTP_201_CREATED)
         self.assertEqual(str(created.data['refund_amount']), '100.00')
+        self.assertEqual([event['status'] for event in created.data['timeline']], ['Initiated'])
+        order_detail = self.client.get(f'/api/orders/orders/{order.id}/')
+        self.assertTrue(order_detail.data['return_eligible'])
+        self.assertEqual(order_detail.data['returns'][0]['id'], created.data['id'])
+        self.assertEqual(Notification.objects.filter(user=self.customer1).count(), 1)
 
         self.client.force_authenticate(user=self.admin_user)
         refund_id = created.data['id']
@@ -264,8 +277,17 @@ class CourierTrackingSystemTestCase(TestCase):
             {'status': 'Refund Processed', 'manual_refund_confirmed': True}, format='json'
         )
         self.assertEqual(refunded.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [event.status for event in ReturnTimeline.objects.filter(return_request_id=refund_id)],
+            ['Initiated', 'Pickup Scheduled', 'Pickup Received', 'Refund Processed'],
+        )
         order.refresh_from_db()
         self.assertEqual(order.payment_status, 'Refunded')
+        self.client.force_authenticate(user=self.customer1)
+        refreshed_order = self.client.get(f'/api/orders/orders/{order.id}/')
+        self.assertEqual(refreshed_order.data['payment_status'], 'Refunded')
+        self.assertEqual(refreshed_order.data['returns'][0]['status'], 'Refund Processed')
+        self.assertEqual(Notification.objects.filter(user=self.customer1).count(), 4)
 
     def test_authorized_razorpay_payment_is_captured_and_retry_is_idempotent(self):
         category = Category.objects.create(name='Payment Test', slug='payment-test')
