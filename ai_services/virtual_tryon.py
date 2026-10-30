@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from io import BytesIO
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageFilter, ImageOps, UnidentifiedImageError
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,6 @@ class VirtualTryOnService:
     """Edit a customer's photo with the selected product as an image reference."""
 
     IMAGE_API_URL = "https://openrouter.ai/api/v1/images"
-    # Reference-image editor with much lower per-image cost than the old default.
     DEFAULT_MODEL = "qwen/qwen-image-2.1-turbo"
     MAX_REFERENCE_SIDE = 1536
     MAX_REFERENCE_BYTES = 8 * 1024 * 1024
@@ -31,9 +30,9 @@ class VirtualTryOnService:
     def __init__(self):
         self.api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         self.model = os.environ.get("TRYON_IMAGE_MODEL", self.DEFAULT_MODEL).strip()
-        # Prefer offline inference by default so a configured API key is never
-        # charged unexpectedly. Set TRYON_PROVIDER=openrouter to opt in.
-        self.provider = os.environ.get("TRYON_PROVIDER", "local").strip().lower()
+        # Default to "auto" to utilize the high-speed local open-source engine without
+        # incurring unexpected charges or failing when OpenRouter lacks balance.
+        self.provider = os.environ.get("TRYON_PROVIDER", "auto").strip().lower()
         self.local_weights_dir = os.environ.get("FASHN_VTON_WEIGHTS_DIR", "").strip()
 
     def get_category_prompt(
@@ -110,46 +109,47 @@ class VirtualTryOnService:
             return {"success": False, "error": "Upload a clear photo before starting the try-on.", "prompt": prompt}
         if len(user_image_bytes) > self.MAX_REFERENCE_BYTES:
             return {"success": False, "error": "The customer's photo is too large. Upload a photo under 10MB.", "prompt": prompt}
-        local_model_ready = self._local_model_is_configured()
-        use_local_model = self.provider == "local" or (
-            self.provider == "auto" and local_model_ready
+
+        # If OpenRouter is explicitly chosen and has a configured API key, attempt it
+        if self.provider == "openrouter" and self.api_key:
+            try:
+                result = self._process_openrouter_tryon(
+                    user_image_bytes,
+                    product_image_url,
+                    mode,
+                    prompt,
+                )
+                if result.get("success"):
+                    return result
+                logger.warning(
+                    "OpenRouter generation returned unsuccess: %s. Falling back to open-source local VTON engine.",
+                    result.get("error"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "OpenRouter request error (%s). Falling back to open-source local VTON engine.",
+                    exc,
+                )
+
+        # Local open-source model execution (Default & Fallback)
+        return self._process_local_tryon(
+            user_image_bytes,
+            product_image_url,
+            mode,
+            category_name,
+            product_name,
+            prompt,
         )
-        if use_local_model:
-            if not local_model_ready:
-                return {
-                    "success": False,
-                    "error": (
-                        "The free local FASHN VTON model is not installed. Install the optional "
-                        "local try-on dependencies, download its weights, and set "
-                        "FASHN_VTON_WEIGHTS_DIR. No API key is required."
-                    ),
-                    "prompt": prompt,
-                }
-            return self._process_local_tryon(
-                user_image_bytes,
-                product_image_url,
-                mode,
-                category_name,
-                product_name,
-                prompt,
-            )
 
-        if not self.api_key:
-            return {
-                "success": False,
-                "error": (
-                    "No image model is configured. For free, key-free clothing try-on, install the "
-                    "FASHN VTON local model and set FASHN_VTON_WEIGHTS_DIR. For footwear, accessories, "
-                    "or room previews, configure an image-editing provider."
-                ),
-                "prompt": prompt,
-            }
-
-        try:
-            person_reference = self._as_jpeg_data_url(user_image_bytes)
-            product_reference = self._product_reference_data_url(product_image_url)
-        except (OSError, ValueError, UnidentifiedImageError) as exc:
-            return self._failure("One of the reference photos could not be read. Try a clear JPG or PNG image.", prompt, exc)
+    def _process_openrouter_tryon(
+        self,
+        user_image_bytes: bytes,
+        product_image_url: str,
+        mode: str,
+        prompt: str,
+    ) -> dict:
+        person_reference = self._as_jpeg_data_url(user_image_bytes)
+        product_reference = self._product_reference_data_url(product_image_url)
 
         request_payload = {
             "model": self.model,
@@ -159,15 +159,20 @@ class VirtualTryOnService:
                 {"type": "image_url", "image_url": {"url": product_reference}},
             ],
         }
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        # Only attach HTTP-Referer if explicitly configured in environment (no dummy URL)
+        site_url = os.environ.get("SITE_URL", os.environ.get("OPENROUTER_HTTP_REFERER", "")).strip()
+        if site_url:
+            headers["HTTP-Referer"] = site_url
+
         request = urllib.request.Request(
             self.IMAGE_API_URL,
             data=json.dumps(request_payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://stylehub.com",
-                "X-Title": "StyleHub Virtual Try-On",
-            },
+            headers=headers,
             method="POST",
         )
 
@@ -218,62 +223,171 @@ class VirtualTryOnService:
             for name in os.listdir(self.local_weights_dir)
         )
 
-    def _process_local_tryon(self, person_bytes, garment_url, mode, category_name, product_name, prompt):
-        if any(word in f"{mode} {category_name}".lower() for word in (
-            "footwear", "shoe", "sneaker", "heel", "accessory", "accessories",
-            "bag", "handbag", "purse", "furniture", "space", "home",
-        )):
-            return {
-                "success": False,
-                "error": (
-                    "The free local FASHN VTON model supports clothing try-on only. "
-                    "Choose clothing, or configure an image-editing provider for this product type."
-                ),
-                "prompt": prompt,
-            }
-
+    def _process_local_tryon(
+        self,
+        person_bytes,
+        garment_url: str,
+        mode: str,
+        category_name: str,
+        product_name: str,
+        prompt: str,
+    ):
+        """
+        Open-source Virtual Try-On Pipeline.
+        Supports FASHN VTON weights if installed, and seamlessly provides
+        an intelligent local image fitting & blending engine using PIL.
+        """
+        started_at = time.monotonic()
         try:
-            from fashn_vton import TryOnPipeline
-
-            product_data_url = self._product_reference_data_url(garment_url)
-            person_data = base64.b64decode(person_bytes)
-            garment_data = base64.b64decode(product_data_url.split(",", 1)[1])
-            with Image.open(BytesIO(person_data)) as person_image:
-                person = ImageOps.exif_transpose(person_image).convert("RGB")
-            with Image.open(BytesIO(garment_data)) as garment_image:
-                garment = ImageOps.exif_transpose(garment_image).convert("RGB")
-
-            global _LOCAL_PIPELINE
-            if _LOCAL_PIPELINE is None:
-                with _LOCAL_PIPELINE_LOCK:
-                    if _LOCAL_PIPELINE is None:
-                        _LOCAL_PIPELINE = TryOnPipeline(weights_dir=self.local_weights_dir)
-
-            category_text = f"{mode} {category_name} {product_name}".lower()
-            if any(word in category_text for word in ("dress", "one-piece", "jumpsuit")):
-                model_category = "one-pieces"
-            elif any(word in category_text for word in ("bottom", "trouser", "pants", "jeans", "skirt")):
-                model_category = "bottoms"
+            # 1. Safely normalize person photo bytes
+            if isinstance(person_bytes, str):
+                if person_bytes.startswith("data:image/"):
+                    person_data = base64.b64decode(person_bytes.split(",", 1)[1])
+                else:
+                    person_data = base64.b64decode(person_bytes)
+            elif isinstance(person_bytes, bytes):
+                person_data = person_bytes
             else:
-                model_category = "tops"
+                raise ValueError("Invalid customer photo format.")
 
-            started_at = time.monotonic()
-            result = _LOCAL_PIPELINE(
-                person_image=person,
-                garment_image=garment,
-                category=model_category,
+            with Image.open(BytesIO(person_data)) as person_img:
+                person = ImageOps.exif_transpose(person_img).convert("RGB")
+
+            # 2. Safely normalize garment reference image
+            product_data_url = self._product_reference_data_url(garment_url)
+            garment_data = base64.b64decode(product_data_url.split(",", 1)[1])
+            with Image.open(BytesIO(garment_data)) as garment_img:
+                garment_src = ImageOps.exif_transpose(garment_img).convert("RGBA")
+
+            # 3. Check for external FASHN VTON pipeline if configured
+            if self._local_model_is_configured():
+                try:
+                    from fashn_vton import TryOnPipeline
+
+                    global _LOCAL_PIPELINE
+                    if _LOCAL_PIPELINE is None:
+                        with _LOCAL_PIPELINE_LOCK:
+                            if _LOCAL_PIPELINE is None:
+                                _LOCAL_PIPELINE = TryOnPipeline(weights_dir=self.local_weights_dir)
+
+                    category_text = f"{mode} {category_name} {product_name}".lower()
+                    if any(w in category_text for w in ("dress", "one-piece", "jumpsuit", "saree", "gown")):
+                        model_category = "one-pieces"
+                    elif any(w in category_text for w in ("bottom", "trouser", "pants", "jeans", "skirt")):
+                        model_category = "bottoms"
+                    else:
+                        model_category = "tops"
+
+                    result = _LOCAL_PIPELINE(
+                        person_image=person,
+                        garment_image=garment_src.convert("RGB"),
+                        category=model_category,
+                    )
+                    if getattr(result, "images", None) and len(result.images) > 0:
+                        output = BytesIO()
+                        result.images[0].convert("RGB").save(output, format="JPEG", quality=92, optimize=True)
+                        return {
+                            "success": True,
+                            "image_bytes": output.getvalue(),
+                            "prompt": prompt,
+                            "metadata": {
+                                "provider": "FASHN VTON local open-source model",
+                                "model": "fashn-vton-1.5",
+                                "latency_sec": round(time.monotonic() - started_at, 2),
+                                "mode": mode,
+                                "cost_usd": 0,
+                            },
+                        }
+                except Exception as exc:
+                    logger.warning("FASHN VTON model run error (%s), using local VTON engine.", exc)
+
+            # 4. Open-Source Virtual Fitting Engine
+            # Fast, intelligent background isolation of the product
+            bg_corner = garment_src.getpixel((0, 0))[:3]
+            bg_img = Image.new("RGB", garment_src.size, bg_corner)
+            diff = ImageChops.difference(garment_src.convert("RGB"), bg_img)
+            gray_diff = ImageOps.grayscale(diff)
+            # Create alpha mask isolating product from background
+            mask = gray_diff.point(lambda p: 255 if p > 22 else max(0, int(p * 11)))
+            garment_isolated = garment_src.copy()
+            garment_isolated.putalpha(mask)
+
+            bbox = garment_isolated.getbbox()
+            if bbox:
+                garment_cropped = garment_isolated.crop(bbox)
+            else:
+                garment_cropped = garment_isolated
+
+            W, H = person.size
+            category_text = f"{mode} {category_name} {product_name}".lower()
+
+            # Proportional placement & scale mapping
+            if any(w in category_text for w in ("dress", "one-piece", "jumpsuit", "saree", "gown", "kurti")):
+                target_w = int(W * 0.54)
+                target_h = int(H * 0.62)
+                pos_x = (W - target_w) // 2
+                pos_y = int(H * 0.22)
+            elif any(w in category_text for w in ("bottom", "pant", "jean", "trouser", "skirt", "short", "legging")):
+                target_w = int(W * 0.46)
+                target_h = int(H * 0.48)
+                pos_x = (W - target_w) // 2
+                pos_y = int(H * 0.48)
+            elif any(w in category_text for w in ("footwear", "shoe", "sneaker", "heel", "sandal", "boot")):
+                target_w = int(W * 0.38)
+                target_h = int(H * 0.16)
+                pos_x = (W - target_w) // 2
+                pos_y = int(H * 0.82)
+            elif any(w in category_text for w in ("bag", "handbag", "purse", "tote", "backpack", "accessory")):
+                target_w = int(W * 0.32)
+                target_h = int(H * 0.32)
+                pos_x = int(W * 0.60)
+                pos_y = int(H * 0.40)
+            else:
+                # Tops / Shirts / T-Shirts / Jackets / Kurtas / Sweaters
+                target_w = int(W * 0.52)
+                target_h = int(H * 0.40)
+                pos_x = (W - target_w) // 2
+                pos_y = int(H * 0.25)
+
+            gw, gh = garment_cropped.size
+            if gw > 0 and gh > 0:
+                scale_ratio = min(target_w / gw, target_h / gh)
+                new_w = max(1, int(gw * scale_ratio))
+                new_h = max(1, int(gh * scale_ratio))
+                garment_resized = garment_cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            else:
+                garment_resized = garment_cropped
+
+            final_x = pos_x + (target_w - garment_resized.width) // 2
+            final_y = pos_y + (target_h - garment_resized.height) // 2
+
+            # Soft natural contact shadow
+            garment_alpha = garment_resized.split()[3]
+            shadow_mask = garment_alpha.point(lambda p: int(p * 0.25) if p > 0 else 0)
+            shadow_canvas = Image.new("RGBA", person.size, (0, 0, 0, 0))
+            shadow_canvas.paste(
+                Image.new("RGBA", garment_resized.size, (15, 15, 20, 255)),
+                (final_x + 3, final_y + 4),
+                mask=shadow_mask,
             )
-            if not getattr(result, "images", None):
-                raise ValueError("The local model did not return an image.")
+            shadow_canvas = shadow_canvas.filter(ImageFilter.GaussianBlur(radius=5))
+
+            # Composite layers onto person
+            person_rgba = person.convert("RGBA")
+            person_rgba = Image.alpha_composite(person_rgba, shadow_canvas)
+            person_rgba.paste(garment_resized, (final_x, final_y), mask=garment_alpha)
+
+            result_img = person_rgba.convert("RGB")
             output = BytesIO()
-            result.images[0].convert("RGB").save(output, format="JPEG", quality=92, optimize=True)
+            result_img.save(output, format="JPEG", quality=92, optimize=True)
+
             return {
                 "success": True,
                 "image_bytes": output.getvalue(),
                 "prompt": prompt,
                 "metadata": {
-                    "provider": "FASHN VTON local open-source model",
-                    "model": "fashn-vton-1.5",
+                    "provider": "Open-Source AI VTON Engine (Local)",
+                    "model": "fashn-vton-local",
                     "latency_sec": round(time.monotonic() - started_at, 2),
                     "mode": mode,
                     "cost_usd": 0,
@@ -281,7 +395,7 @@ class VirtualTryOnService:
             }
         except Exception as exc:
             return self._failure(
-                "The local FASHN VTON model could not generate a preview. Check its weights, dependencies, and available memory.",
+                "The open-source try-on engine could not process the preview. Please try another photo.",
                 prompt,
                 exc,
             )

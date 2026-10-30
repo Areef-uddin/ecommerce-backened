@@ -113,12 +113,17 @@ class OrderViewSet(viewsets.ModelViewSet):
         else:
             qs = Order.objects.filter(user=user).prefetch_related('items', 'timeline', 'shipment__milestones', 'returns__timeline')
 
-        order_status = self.request.query_params.get('status')
-        if order_status and order_status.lower() != 'all':
-            if order_status.lower() == 'processing':
-                qs = qs.filter(order_status__in=['Placed', 'Order Placed', 'Confirmed', 'Packed'])
-            elif order_status.lower() == 'shipped':
-                qs = qs.filter(order_status__in=['Picked Up', 'In Transit', 'Shipped', 'Out for Delivery'])
+        order_status = self.request.query_params.get('status', '').strip()
+        normalized_status = order_status.lower()
+        if normalized_status and normalized_status != 'all':
+            if normalized_status == 'processing':
+                qs = qs.filter(order_status__in=['Processing', 'Placed', 'Order Placed', 'Confirmed', 'Packed'])
+            elif normalized_status == 'shipped':
+                qs = qs.filter(order_status__in=['Picked Up', 'In Transit', 'Shipped', 'Dispatched', 'Out for Delivery'])
+            elif normalized_status in ['returns', 'return', 'refund']:
+                qs = qs.filter(returns__isnull=False).distinct()
+            elif normalized_status == 'delivered':
+                qs = qs.filter(order_status__iexact='Delivered')
             else:
                 qs = qs.filter(order_status__iexact=order_status)
 

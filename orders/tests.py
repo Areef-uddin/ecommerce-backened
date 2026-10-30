@@ -190,6 +190,34 @@ class CourierTrackingSystemTestCase(TestCase):
         self.assertTrue(set(shipping_orders).issubset(returned_ids))
         self.assertNotIn(delivered.id, returned_ids)
 
+    def test_customer_processing_filter_contains_only_unshipped_orders(self):
+        self.client.force_authenticate(user=self.customer1)
+        processing_ids = []
+        for stage in ['Processing', 'Placed', 'Order Placed', 'Confirmed', 'Packed']:
+            processing_ids.append(Order.objects.create(
+                user=self.customer1,
+                customer_name='Priya Sharma',
+                phone='+91 9876543210',
+                delivery_address='123 Fashion Street, Bengaluru',
+                total_amount=100,
+                order_status=stage,
+            ).id)
+        shipped = Order.objects.create(
+            user=self.customer1,
+            customer_name='Priya Sharma',
+            phone='+91 9876543210',
+            delivery_address='123 Fashion Street, Bengaluru',
+            total_amount=100,
+            order_status='Shipped',
+        )
+
+        response = self.client.get('/api/orders/orders/?status=Processing')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {order['id'] for order in response.data}
+        self.assertTrue(set(processing_ids).issubset(returned_ids))
+        self.assertNotIn(shipped.id, returned_ids)
+
     def test_cod_payment_is_recorded_paid_on_delivery(self):
         order = Order.objects.create(
             user=self.customer1,
