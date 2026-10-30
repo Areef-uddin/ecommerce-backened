@@ -19,16 +19,21 @@ class DemoCourierProvider(BaseCourierProvider):
         return [cfg['status'] for cfg in TRACKING_STAGES_CONFIG]
 
     def create_shipment(self, order: Order) -> ShipmentTracking:
+        # Older demo orders used "Placed" while the shipment timeline uses
+        # "Order Placed". Normalize once so filters and admin progression agree.
+        if order.order_status == 'Placed':
+            order.order_status = 'Order Placed'
+            order.save(update_fields=['order_status', 'updated_at'])
         tracking_number = f"TEST-FASH-{1000 + order.id}"
         
         shipment, created = ShipmentTracking.objects.get_or_create(
             order=order,
             defaults={
                 'tracking_number': tracking_number,
-                'courier_name': order.courier_name or 'StyleHub Express',
-                'is_demo_mode': False,
+                'courier_name': 'StyleHub Express (Demo Logistics)',
+                'is_demo_mode': True,
                 'current_status': order.order_status if order.order_status in self.get_supported_statuses() else 'Order Placed',
-                'current_location': order.current_location or 'Bengaluru Fulfillment Center',
+                'current_location': 'Bengaluru Fulfillment Center',
                 'estimated_delivery': order.estimated_delivery or '31 Oct - 03 Nov',
                 'delivery_person_name': order.delivery_partner_name or 'Rahul Kumar',
                 'delivery_person_phone': order.delivery_partner_phone or '+91 9876543210',
@@ -115,7 +120,11 @@ class DemoCourierProvider(BaseCourierProvider):
         # Update linked order
         order = shipment.order
         order.order_status = new_status
-        order.save()
+        update_fields = ['order_status', 'updated_at']
+        if new_status == 'Delivered' and order.payment_method in ['Cash on Delivery', 'COD'] and order.payment_status == 'Pending':
+            order.payment_status = 'Paid'
+            update_fields.append('payment_status')
+        order.save(update_fields=update_fields)
 
         # Sync OrderTimeline
         self._sync_order_timeline(order, target_idx)

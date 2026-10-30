@@ -512,21 +512,8 @@ class Command(BaseCommand):
             image_url=black_bag.images.first().image_url
         )
 
-        # Also set up items in Cart (Screen 10)
+        # Seeded demo accounts start with an empty bag. Real cart entries are
+        # created only through the customer's Add to Cart action.
         CartItem.objects.filter(user=customer).delete()
-        CartItem.objects.create(
-            user=customer,
-            product=floral_dress,
-            quantity=1,
-            size='M',
-            color='Pink'
-        )
-        CartItem.objects.create(
-            user=customer,
-            product=white_sneakers,
-            quantity=1,
-            size='7',
-            color='White'
-        )
 
         self.stdout.write(self.style.SUCCESS('StyleHub Database seeded with 100% dynamic fashion data!'))

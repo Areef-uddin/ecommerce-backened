@@ -72,6 +72,7 @@ class Order(models.Model):
     # Payment
     payment_method = models.CharField(max_length=50, choices=PAYMENT_CHOICES, default='UPI')
     payment_status = models.CharField(max_length=20, default='Paid')
+    payment_reference = models.CharField(max_length=100, unique=True, null=True, blank=True)
 
     # Status
     order_status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='Placed')
@@ -140,7 +141,9 @@ class ReturnRequest(models.Model):
     STATUS_CHOICES = (
         ('Initiated', 'Initiated'),
         ('Pickup Scheduled', 'Pickup Scheduled'),
+        ('Pickup Received', 'Pickup Received'),
         ('Refund Processed', 'Refund Processed'),
+        ('Rejected', 'Rejected'),
     )
 
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='returns')

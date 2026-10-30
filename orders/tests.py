@@ -1,9 +1,12 @@
 from django.test import TestCase
 from django.contrib.auth import get_user_model
+from unittest.mock import patch
 from rest_framework.test import APIClient
 from rest_framework import status
-from .models import Order, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
+from django.test import override_settings
+from .models import CartItem, Order, OrderItem, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
 from .courier import get_courier_provider
+from products.models import Category, Product
 
 User = get_user_model()
 
@@ -109,6 +112,45 @@ class CourierTrackingSystemTestCase(TestCase):
         self.assertTrue(res.data['is_demo_mode'])
         self.assertEqual(len(res.data['milestones']), 7)
 
+    def test_buy_again_readds_order_products_and_merges_existing_cart_quantity(self):
+        category = Category.objects.create(name='Buy Again Test', slug='buy-again-test')
+        product = Product.objects.create(
+            name='Buy Again Shirt',
+            slug='buy-again-shirt',
+            category=category,
+            description='Test product',
+            price='1200.00',
+        )
+        OrderItem.objects.create(
+            order=self.order1,
+            product=product,
+            product_name=product.name,
+            price=product.price,
+            quantity=2,
+            size='M',
+            color='Blue',
+        )
+        CartItem.objects.create(
+            user=self.customer1,
+            product=product,
+            quantity=1,
+            size='M',
+            color='Blue',
+        )
+        self.client.force_authenticate(user=self.customer1)
+
+        response = self.client.post(
+            f'/api/orders/orders/{self.order1.id}/buy_again/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['added_items'], 1)
+        self.assertEqual(
+            CartItem.objects.get(user=self.customer1, product=product).quantity,
+            3,
+        )
     def test_non_admin_cannot_update_status(self):
         """Unauthorized customer cannot update order status."""
         self.client.force_authenticate(user=self.customer1)
@@ -118,3 +160,158 @@ class CourierTrackingSystemTestCase(TestCase):
             format='json'
         )
         self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_customer_shipped_filter_includes_in_flight_statuses(self):
+        self.client.force_authenticate(user=self.customer1)
+        shipping_orders = []
+        for stage in ['Picked Up', 'In Transit', 'Shipped', 'Out for Delivery']:
+            shipping_orders.append(Order.objects.create(
+                user=self.customer1,
+                customer_name='Priya Sharma',
+                phone='+91 9876543210',
+                delivery_address='123 Fashion Street, Bengaluru',
+                total_amount=100,
+                order_status=stage,
+            ).id)
+        delivered = Order.objects.create(
+            user=self.customer1,
+            customer_name='Priya Sharma',
+            phone='+91 9876543210',
+            delivery_address='123 Fashion Street, Bengaluru',
+            total_amount=100,
+            order_status='Delivered',
+        )
+
+        response = self.client.get('/api/orders/orders/?status=Shipped')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {order['id'] for order in response.data}
+        self.assertTrue(set(shipping_orders).issubset(returned_ids))
+        self.assertNotIn(delivered.id, returned_ids)
+
+    def test_cod_payment_is_recorded_paid_on_delivery(self):
+        order = Order.objects.create(
+            user=self.customer1,
+            customer_name='Priya Sharma',
+            phone='+91 9876543210',
+            delivery_address='123 Fashion Street, Bengaluru',
+            total_amount=100,
+            payment_method='Cash on Delivery',
+            payment_status='Pending',
+            order_status='Order Placed',
+        )
+        shipment = self.provider.create_shipment(order)
+
+        self.provider.update_status(shipment.tracking_number, 'Delivered')
+
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'Paid')
+
+    def test_return_refund_requires_delivery_and_received_item(self):
+        category = Category.objects.create(name='Test', slug='test')
+        product = Product.objects.create(
+            name='Test item', slug='test-item', category=category,
+            description='Test item', price=100,
+        )
+        order = Order.objects.create(
+            user=self.customer1,
+            customer_name='Priya Sharma',
+            phone='+91 9876543210',
+            delivery_address='123 Fashion Street, Bengaluru',
+            item_total=100,
+            total_amount=100,
+            payment_method='Cash on Delivery',
+            payment_status='Pending',
+            order_status='Order Placed',
+        )
+        item = OrderItem.objects.create(
+            order=order, product=product, product_name=product.name,
+            price=100, quantity=1,
+        )
+        shipment = self.provider.create_shipment(order)
+        self.provider.update_status(shipment.tracking_number, 'Delivered')
+
+        self.client.force_authenticate(user=self.customer1)
+        created = self.client.post('/api/orders/returns/', {
+            'order_id': order.id,
+            'order_item_id': item.id,
+            'reason': 'Defective',
+            'pickup_type': 'Pickup',
+        }, format='json')
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(str(created.data['refund_amount']), '100.00')
+
+        self.client.force_authenticate(user=self.admin_user)
+        refund_id = created.data['id']
+        premature_refund = self.client.post(
+            f'/api/orders/returns/{refund_id}/update_status/',
+            {'status': 'Refund Processed', 'manual_refund_confirmed': True}, format='json'
+        )
+        self.assertEqual(premature_refund.status_code, status.HTTP_400_BAD_REQUEST)
+
+        scheduled = self.client.post(
+            f'/api/orders/returns/{refund_id}/update_status/',
+            {'status': 'Pickup Scheduled'}, format='json'
+        )
+        self.assertEqual(scheduled.status_code, status.HTTP_200_OK)
+        received = self.client.post(
+            f'/api/orders/returns/{refund_id}/update_status/',
+            {'status': 'Pickup Received'}, format='json'
+        )
+        self.assertEqual(received.status_code, status.HTTP_200_OK)
+        refunded = self.client.post(
+            f'/api/orders/returns/{refund_id}/update_status/',
+            {'status': 'Refund Processed', 'manual_refund_confirmed': True}, format='json'
+        )
+        self.assertEqual(refunded.status_code, status.HTTP_200_OK)
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'Refunded')
+
+    def test_authorized_razorpay_payment_is_captured_and_retry_is_idempotent(self):
+        category = Category.objects.create(name='Payment Test', slug='payment-test')
+        product = Product.objects.create(
+            name='Payment item', slug='payment-item', category=category,
+            description='Payment test item', price=100,
+        )
+        CartItem.objects.create(user=self.customer1, product=product, quantity=1)
+        self.client.force_authenticate(user=self.customer1)
+        body = {
+            'razorpay_order_id': 'order_verified_test',
+            'razorpay_payment_id': 'pay_verified_test',
+            'razorpay_signature': 'valid-test-signature',
+        }
+
+        with override_settings(RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test-secret'):
+            with patch('orders.views.razorpay.Client') as client_factory:
+                gateway = client_factory.return_value
+                gateway.order.fetch.return_value = {
+                    'notes': {'user_id': str(self.customer1.id)},
+                    'amount': 10000,
+                    'currency': 'INR',
+                }
+                gateway.payment.fetch.return_value = {
+                    'order_id': body['razorpay_order_id'],
+                    'status': 'authorized',
+                    'amount': 10000,
+                    'currency': 'INR',
+                }
+                gateway.payment.capture.return_value = {
+                    'order_id': body['razorpay_order_id'],
+                    'status': 'captured',
+                    'amount': 10000,
+                    'currency': 'INR',
+                }
+
+                first = self.client.post('/api/orders/orders/verify_razorpay_payment/', body, format='json')
+                self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(first.data['payment_status'], 'Paid')
+                self.assertEqual(Order.objects.get(id=first.data['id']).payment_reference, body['razorpay_payment_id'])
+                gateway.payment.capture.assert_called_once_with(body['razorpay_payment_id'], {
+                    'amount': 10000,
+                    'currency': 'INR',
+                })
+
+                retry = self.client.post('/api/orders/orders/verify_razorpay_payment/', body, format='json')
+                self.assertEqual(retry.status_code, status.HTTP_200_OK)
+                self.assertEqual(retry.data['id'], first.data['id'])
+                gateway.order.fetch.assert_called_once_with(body['razorpay_order_id'])

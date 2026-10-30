@@ -1,61 +1,91 @@
-import os
-import json
 import base64
+import functools
+import json
+import logging
+import os
+import threading
 import time
-import urllib.request
 import urllib.error
-from pathlib import Path
+import urllib.request
 from io import BytesIO
-from django.conf import settings
-from PIL import Image, ImageOps, ImageEnhance, ImageFilter
+
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+
+logger = logging.getLogger(__name__)
+_LOCAL_PIPELINE_LOCK = threading.Lock()
+_LOCAL_PIPELINE = None
+
 
 class VirtualTryOnService:
-    """
-    Production-grade AI Virtual Try-On and Product Visualization Service.
-    Coordinates OpenRouter multimodal AI image generation and fallback vision compositing.
-    """
+    """Edit a customer's photo with the selected product as an image reference."""
 
-    OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-    DEFAULT_MODEL = "google/gemini-2.5-flash-image"
+    IMAGE_API_URL = "https://openrouter.ai/api/v1/images"
+    # Reference-image editor with much lower per-image cost than the old default.
+    DEFAULT_MODEL = "qwen/qwen-image-2.1-turbo"
+    MAX_REFERENCE_SIDE = 1536
+    MAX_REFERENCE_BYTES = 8 * 1024 * 1024
+    MAX_PRODUCT_DOWNLOAD_BYTES = 12 * 1024 * 1024
+    REQUEST_TIMEOUT_SECONDS = 120
 
     def __init__(self):
-        self.api_key = os.environ.get('OPENROUTER_API_KEY') or getattr(settings, 'OPENROUTER_API_KEY', '')
+        self.api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        self.model = os.environ.get("TRYON_IMAGE_MODEL", self.DEFAULT_MODEL).strip()
+        # Prefer offline inference by default so a configured API key is never
+        # charged unexpectedly. Set TRYON_PROVIDER=openrouter to opt in.
+        self.provider = os.environ.get("TRYON_PROVIDER", "local").strip().lower()
+        self.local_weights_dir = os.environ.get("FASHN_VTON_WEIGHTS_DIR", "").strip()
 
-    def get_category_prompt(self, mode: str, product_name: str, category_name: str, product_description: str = "") -> str:
-        mode_lower = mode.lower()
-        cat_lower = category_name.lower()
+    def get_category_prompt(
+        self,
+        mode: str,
+        product_name: str,
+        category_name: str,
+        product_description: str = "",
+    ) -> str:
+        mode_lower = (mode or "clothing").lower()
+        category_lower = (category_name or "").lower()
+        details = (product_description or "").strip()
 
-        if 'foot' in mode_lower or 'shoe' in mode_lower or 'footwear' in cat_lower:
-            return (
-                f"Create a photorealistic product visualization placing the selected footwear ({product_name}) naturally "
-                f"on the person's feet. Preserve the person's identity, legs, and pose, while replacing or fitting the footwear "
-                f"with the exact color, sole structure, branding, texture, and natural contact shadows on the floor/ground. "
-                f"Product details: {product_description}"
+        preserve_person = (
+            "REFERENCE 1 is the customer's photo and is the base image. Preserve this exact person: "
+            "face, identity, age, skin tone, hairstyle, body shape, pose, expression, and gender presentation. "
+            "Keep the same camera angle, crop, lighting, and background. Do not replace the person, add another person, "
+            "beautify their face, or change anything unrelated to the product. REFERENCE 2 is the exact product to use. "
+            "Use its real colour, silhouette, material, pattern, trim, and hardware; do not invent a substitute. "
+            "Make one natural, photorealistic customer preview with realistic fit, perspective, shadows, and occlusion."
+        )
+
+        if any(word in mode_lower or word in category_lower for word in ("furniture", "furnishing", "space", "home", "decor")):
+            action = (
+                f"Place the exact selected home product, {product_name}, into the customer's room photo. "
+                "Set it on a physically plausible surface or floor, at a believable scale and perspective, with contact shadow. "
+                "Preserve the room layout and all existing furniture."
             )
-        elif 'access' in mode_lower or 'bag' in cat_lower or 'watch' in cat_lower or 'jewel' in cat_lower:
-            return (
-                f"Create a photorealistic visualization placing the selected accessory ({product_name}) naturally with the person. "
-                f"If it is a handbag or bag, place it naturally held in the person's hand or gracefully over the shoulder with "
-                f"realistic straps, gravity, ambient shadows, and true product scale, materials, and hardware. "
-                f"Preserve the person's facial identity, skin tone, hairstyle, outfit, and background accurately. "
-                f"Product details: {product_description}"
+        elif any(word in mode_lower or word in category_lower for word in ("footwear", "foot", "shoe", "sneaker", "heel")):
+            action = (
+                f"Show the selected footwear, {product_name}, being worn on the customer's visible feet. "
+                "Fit each shoe to the correct foot and angle, preserve the legs and pose, and match the ground perspective. "
+                "If the feet are not visible, do not fabricate a body or feet; return a natural product preview beside the person."
             )
-        elif 'space' in mode_lower or 'furn' in mode_lower or 'home' in cat_lower or 'decor' in cat_lower:
-            return (
-                f"Place the selected product ({product_name}) realistically inside the provided room photograph. "
-                f"Respect the room floor perspective, ambient lighting, room scale, contact shadows, and occlusion with surrounding walls "
-                f"and furniture. Produce a natural interior scene. Product details: {product_description}"
+        elif any(word in mode_lower or word in category_lower for word in ("accessory", "accessories", "bag", "handbag", "purse")):
+            action = (
+                f"Add the exact accessory, {product_name}, to the customer in a natural way. "
+                "For a bag or handbag, inspect the customer's pose and visible hands, then place it in the nearest free hand "
+                "with a believable grip and strap, or over the shoulder if that is more natural. Keep the bag at realistic scale; "
+                "show hand-to-handle contact, correct perspective, and a soft contact shadow. Do not cover the face. "
+                "For a watch or jewellery, place it on the appropriate visible wrist or body area."
             )
         else:
-            # Standard Clothing Try-On Prompt
-            return (
-                f"Create a highly photorealistic virtual try-on image using the supplied person photograph and the exact selected garment product reference. "
-                f"The first reference is the person whose appearance should be preserved. The second reference is the exact garment ({product_name}) to be worn. "
-                f"Dress the person in the selected garment with realistic body alignment, garment fit, fabric behaviour, natural folds, stitching, shadows, "
-                f"lighting, and perspective. Preserve the person's facial identity, skin tone, hairstyle, body proportions, and background. "
-                f"Do not modify the garment's essential colour, design, silhouette, cuts, or materials. The resulting image must look like a real customer preview, "
-                f"not an advertisement or an unrelated fashion photoshoot. Details: {product_description}"
+            action = (
+                f"Dress the customer in the exact selected garment, {product_name}. Fit it to the person's visible body and pose, "
+                "preserving their identity and proportions. Adapt the garment naturally to the person shown; never infer or change "
+                "the person's gender from the product category. Reproduce the garment's real cut, neckline, sleeves, length, "
+                "pattern, colour, and fabric from REFERENCE 2. Do not paste a flat product photo over the person's face or body."
             )
+
+        product_details = f" Product details: {details}" if details else ""
+        return f"{preserve_person} {action}{product_details} Return only the finished edited image."
 
     def process_tryon(
         self,
@@ -65,242 +95,279 @@ class VirtualTryOnService:
         product_name: str = "",
         category_name: str = "",
         product_description: str = "",
-        user_image_bytes: bytes = None
+        user_image_bytes: bytes = None,
     ) -> dict:
-        """
-        Executes try-on generation using OpenRouter or high-fidelity visual compositing.
-        Accepts either user_image_bytes (in-memory) or user_image_path (disk).
-        """
         prompt = self.get_category_prompt(mode, product_name, category_name, product_description)
 
-        # 1. Obtain user image bytes
-        user_bytes = user_image_bytes
-        if not user_bytes and user_image_path:
+        if not user_image_bytes and user_image_path:
             try:
-                with open(user_image_path, "rb") as f:
-                    user_bytes = f.read()
-            except Exception as e:
-                print(f"[VirtualTryOn] Could not read user_image_path: {e}")
+                with open(user_image_path, "rb") as photo_file:
+                    user_image_bytes = photo_file.read(self.MAX_REFERENCE_BYTES + 1)
+            except OSError as exc:
+                return self._failure("Could not read the customer's photo.", prompt, exc)
 
-        if not user_bytes:
-            return {"success": False, "error": "No user image was provided or could be read.", "prompt": prompt}
+        if not user_image_bytes:
+            return {"success": False, "error": "Upload a clear photo before starting the try-on.", "prompt": prompt}
+        if len(user_image_bytes) > self.MAX_REFERENCE_BYTES:
+            return {"success": False, "error": "The customer's photo is too large. Upload a photo under 10MB.", "prompt": prompt}
+        local_model_ready = self._local_model_is_configured()
+        use_local_model = self.provider == "local" or (
+            self.provider == "auto" and local_model_ready
+        )
+        if use_local_model:
+            if not local_model_ready:
+                return {
+                    "success": False,
+                    "error": (
+                        "The free local FASHN VTON model is not installed. Install the optional "
+                        "local try-on dependencies, download its weights, and set "
+                        "FASHN_VTON_WEIGHTS_DIR. No API key is required."
+                    ),
+                    "prompt": prompt,
+                }
+            return self._process_local_tryon(
+                user_image_bytes,
+                product_image_url,
+                mode,
+                category_name,
+                product_name,
+                prompt,
+            )
 
-        user_b64 = base64.b64encode(user_bytes).decode('utf-8')
-        mime = "image/jpeg"
-        if user_image_path and user_image_path.lower().endswith(".png"):
-            mime = "image/png"
-        user_data_url = f"data:{mime};base64,{user_b64}"
-
-        # 2. Call OpenRouter Multimodal AI Model if key is available
-        if self.api_key:
-            payload = {
-                "model": self.DEFAULT_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": user_data_url}},
-                            {"type": "image_url", "image_url": {"url": product_image_url}},
-                        ]
-                    }
-                ],
-                "modalities": ["image", "text"]
+        if not self.api_key:
+            return {
+                "success": False,
+                "error": (
+                    "No image model is configured. For free, key-free clothing try-on, install the "
+                    "FASHN VTON local model and set FASHN_VTON_WEIGHTS_DIR. For footwear, accessories, "
+                    "or room previews, configure an image-editing provider."
+                ),
+                "prompt": prompt,
             }
 
-            headers = {
+        try:
+            person_reference = self._as_jpeg_data_url(user_image_bytes)
+            product_reference = self._product_reference_data_url(product_image_url)
+        except (OSError, ValueError, UnidentifiedImageError) as exc:
+            return self._failure("One of the reference photos could not be read. Try a clear JPG or PNG image.", prompt, exc)
+
+        request_payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "input_references": [
+                {"type": "image_url", "image_url": {"url": person_reference}},
+                {"type": "image_url", "image_url": {"url": product_reference}},
+            ],
+        }
+        request = urllib.request.Request(
+            self.IMAGE_API_URL,
+            data=json.dumps(request_payload).encode("utf-8"),
+            headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://stylehub.com",
-                "X-Title": "StyleHub AI Virtual Try-On",
-            }
+                "X-Title": "StyleHub Virtual Try-On",
+            },
+            method="POST",
+        )
 
-            req = urllib.request.Request(
-                self.OPENROUTER_API_URL,
-                data=json.dumps(payload).encode('utf-8'),
-                headers=headers
+        started_at = time.monotonic()
+        try:
+            with urllib.request.urlopen(request, timeout=self.REQUEST_TIMEOUT_SECONDS) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            response_text = exc.read(16_384).decode("utf-8", errors="replace")
+            return self._failure(self._provider_error(exc.code, response_text), prompt, exc)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return self._failure(
+                "The AI image service could not be reached. Please retry in a moment.", prompt, exc
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return self._failure("The AI image service returned an unreadable response. Please retry.", prompt, exc)
+
+        try:
+            image_data = response_data.get("data") or []
+            if not image_data:
+                raise ValueError("The AI image service returned no generated image.")
+            image_bytes = self._decode_generated_image(image_data[0])
+            image_bytes = self._normalize_generated_image(image_bytes)
+        except (KeyError, TypeError, ValueError, OSError, UnidentifiedImageError) as exc:
+            return self._failure(
+                "The AI image service did not return a usable preview. Please try another photo.", prompt, exc
             )
 
-            try:
-                start_t = time.time()
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    res_data = json.loads(response.read().decode('utf-8'))
-                    choices = res_data.get('choices', [{}])[0]
-                    message = choices.get('message', {})
-                    images = message.get('images', [])
-
-                    if images and len(images) > 0:
-                        img_item = images[0]
-                        if isinstance(img_item, dict) and 'url' in img_item:
-                            img_url = img_item['url']
-                            if img_url.startswith('data:image'):
-                                b64_data = img_url.split(',', 1)[1]
-                                out_bytes = base64.b64decode(b64_data)
-                                return {
-                                    "success": True,
-                                    "image_bytes": out_bytes,
-                                    "prompt": prompt,
-                                    "metadata": {
-                                        "provider": "OpenRouter",
-                                        "model": self.DEFAULT_MODEL,
-                                        "latency_sec": round(time.time() - start_t, 2),
-                                        "mode": mode,
-                                    }
-                                }
-            except urllib.error.HTTPError as http_err:
-                err_body = ""
-                try:
-                    err_body = http_err.read().decode('utf-8')
-                except Exception:
-                    pass
-                print(f"[OpenRouter Try-On HTTP Error {http_err.code}]: {err_body}")
-
-                # If OpenRouter balance requires credit or provider timeout, use vision composite
-                composite_bytes = self._generate_visual_composite(
-                    user_img_path=user_image_path,
-                    product_url=product_image_url,
-                    mode=mode,
-                    user_img_bytes=user_bytes
-                )
-                return {
-                    "success": True,
-                    "image_bytes": composite_bytes,
-                    "prompt": prompt,
-                    "metadata": {
-                        "provider": "StyleHub-Vision-Engine",
-                        "model": self.DEFAULT_MODEL,
-                        "notice": "Rendered via photorealistic computer vision pipeline",
-                        "openrouter_status": f"HTTP {http_err.code}",
-                        "mode": mode,
-                    }
-                }
-            except Exception as e:
-                print(f"[OpenRouter Try-On Error]: {e}")
-                composite_bytes = self._generate_visual_composite(
-                    user_img_path=user_image_path,
-                    product_url=product_image_url,
-                    mode=mode,
-                    user_img_bytes=user_bytes
-                )
-                return {
-                    "success": True,
-                    "image_bytes": composite_bytes,
-                    "prompt": prompt,
-                    "metadata": {
-                        "provider": "StyleHub-Vision-Engine",
-                        "notice": "Simulated photorealistic garment composite",
-                        "mode": mode,
-                    }
-                }
-
-        # Fallback if no API key
-        composite_bytes = self._generate_visual_composite(
-            user_img_path=user_image_path,
-            product_url=product_image_url,
-            mode=mode,
-            user_img_bytes=user_bytes
-        )
+        usage = response_data.get("usage") or {}
         return {
             "success": True,
-            "image_bytes": composite_bytes,
+            "image_bytes": image_bytes,
             "prompt": prompt,
             "metadata": {
-                "provider": "StyleHub-Vision-Engine",
-                "notice": "Simulated photorealistic garment composite",
+                "provider": "OpenRouter Image API",
+                "model": self.model,
+                "latency_sec": round(time.monotonic() - started_at, 2),
                 "mode": mode,
-            }
+                "cost_usd": usage.get("cost"),
+            },
         }
 
-    def _generate_visual_composite(
-        self,
-        user_img_path: str = None,
-        product_url: str = "",
-        mode: str = "clothing",
-        user_img_bytes: bytes = None
-    ) -> bytes:
-        """
-        High-fidelity computer vision image compositor.
-        Loads the user's photo and actual product photo in-memory,
-        performs realistic scaling, feathered alpha masking, ambient shading, and alignment.
-        """
-        base_img = None
-        if user_img_bytes:
-            try:
-                base_img = Image.open(BytesIO(user_img_bytes)).convert("RGBA")
-            except Exception as e:
-                print(f"Error opening user_img_bytes: {e}")
+    def _local_model_is_configured(self):
+        if not self.local_weights_dir:
+            return False
+        return os.path.isdir(self.local_weights_dir) and any(
+            name.endswith((".safetensors", ".pt", ".pth"))
+            for name in os.listdir(self.local_weights_dir)
+        )
 
-        if not base_img and user_img_path:
-            try:
-                base_img = Image.open(user_img_path).convert("RGBA")
-            except Exception as e:
-                print(f"Error opening user_img_path: {e}")
+    def _process_local_tryon(self, person_bytes, garment_url, mode, category_name, product_name, prompt):
+        if any(word in f"{mode} {category_name}".lower() for word in (
+            "footwear", "shoe", "sneaker", "heel", "accessory", "accessories",
+            "bag", "handbag", "purse", "furniture", "space", "home",
+        )):
+            return {
+                "success": False,
+                "error": (
+                    "The free local FASHN VTON model supports clothing try-on only. "
+                    "Choose clothing, or configure an image-editing provider for this product type."
+                ),
+                "prompt": prompt,
+            }
 
-        if not base_img:
-            base_img = Image.new("RGBA", (800, 1000), (245, 245, 245, 255))
+        try:
+            from fashn_vton import TryOnPipeline
 
-        # Download or load product image
-        prod_img = None
-        if product_url and product_url.startswith('http'):
-            try:
-                req = urllib.request.Request(product_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    prod_bytes = resp.read()
-                prod_img = Image.open(BytesIO(prod_bytes)).convert("RGBA")
-            except Exception as e:
-                print(f"Error downloading product image: {e}")
+            product_data_url = self._product_reference_data_url(garment_url)
+            person_data = base64.b64decode(person_bytes)
+            garment_data = base64.b64decode(product_data_url.split(",", 1)[1])
+            with Image.open(BytesIO(person_data)) as person_image:
+                person = ImageOps.exif_transpose(person_image).convert("RGB")
+            with Image.open(BytesIO(garment_data)) as garment_image:
+                garment = ImageOps.exif_transpose(garment_image).convert("RGB")
 
-        if not prod_img:
-            prod_img = Image.new("RGBA", (400, 400), (225, 29, 72, 200))
+            global _LOCAL_PIPELINE
+            if _LOCAL_PIPELINE is None:
+                with _LOCAL_PIPELINE_LOCK:
+                    if _LOCAL_PIPELINE is None:
+                        _LOCAL_PIPELINE = TryOnPipeline(weights_dir=self.local_weights_dir)
 
-        bw, bh = base_img.size
+            category_text = f"{mode} {category_name} {product_name}".lower()
+            if any(word in category_text for word in ("dress", "one-piece", "jumpsuit")):
+                model_category = "one-pieces"
+            elif any(word in category_text for word in ("bottom", "trouser", "pants", "jeans", "skirt")):
+                model_category = "bottoms"
+            else:
+                model_category = "tops"
 
-        mode_l = mode.lower()
-        if 'foot' in mode_l:
-            # Place footwear near lower portion
-            target_w = int(bw * 0.45)
-            ratio = target_w / prod_img.width
-            target_h = int(prod_img.height * ratio)
-            resized_prod = prod_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            pos_x = int((bw - target_w) / 2)
-            pos_y = int(bh * 0.72)
-        elif 'bag' in mode_l or 'access' in mode_l:
-            # Place accessory / handbag gracefully
-            target_w = int(bw * 0.42)
-            ratio = target_w / prod_img.width
-            target_h = int(prod_img.height * ratio)
-            resized_prod = prod_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            pos_x = int(bw * 0.52)
-            pos_y = int(bh * 0.48)
-        elif 'space' in mode_l or 'furn' in mode_l:
-            # Place furniture on floor plane
-            target_w = int(bw * 0.55)
-            ratio = target_w / prod_img.width
-            target_h = int(prod_img.height * ratio)
-            resized_prod = prod_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            pos_x = int((bw - target_w) / 2)
-            pos_y = int(bh * 0.55)
+            started_at = time.monotonic()
+            result = _LOCAL_PIPELINE(
+                person_image=person,
+                garment_image=garment,
+                category=model_category,
+            )
+            if not getattr(result, "images", None):
+                raise ValueError("The local model did not return an image.")
+            output = BytesIO()
+            result.images[0].convert("RGB").save(output, format="JPEG", quality=92, optimize=True)
+            return {
+                "success": True,
+                "image_bytes": output.getvalue(),
+                "prompt": prompt,
+                "metadata": {
+                    "provider": "FASHN VTON local open-source model",
+                    "model": "fashn-vton-1.5",
+                    "latency_sec": round(time.monotonic() - started_at, 2),
+                    "mode": mode,
+                    "cost_usd": 0,
+                },
+            }
+        except Exception as exc:
+            return self._failure(
+                "The local FASHN VTON model could not generate a preview. Check its weights, dependencies, and available memory.",
+                prompt,
+                exc,
+            )
+
+    def _product_reference_data_url(self, image_url: str) -> str:
+        if not image_url:
+            raise ValueError("The selected product has no reference image.")
+
+        if image_url.startswith("data:image/"):
+            encoded = image_url.split(",", 1)[-1]
+            image_bytes = base64.b64decode(encoded, validate=True)
+        elif image_url.startswith(("https://", "http://")):
+            request = urllib.request.Request(image_url, headers={"User-Agent": "StyleHub-TryOn/1.0"})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                image_bytes = response.read(self.MAX_PRODUCT_DOWNLOAD_BYTES + 1)
         else:
-            # Clothing: fit over torso
-            target_w = int(bw * 0.62)
-            ratio = target_w / prod_img.width
-            target_h = int(prod_img.height * ratio)
-            resized_prod = prod_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            pos_x = int((bw - target_w) / 2)
-            pos_y = int(bh * 0.28)
+            raise ValueError("The selected product image URL is invalid.")
 
-        # Apply soft ambient shadow
-        shadow = Image.new("RGBA", (target_w + 20, target_h + 20), (0, 0, 0, 0))
-        shadow_mask = resized_prod.split()[-1].filter(ImageFilter.GaussianBlur(12))
-        shadow_color = Image.new("RGBA", shadow.size, (0, 0, 0, 70))
-        shadow.paste(shadow_color, (10, 10), mask=shadow_mask)
+        if not image_bytes or len(image_bytes) > self.MAX_PRODUCT_DOWNLOAD_BYTES:
+            raise ValueError("The selected product photo is empty or too large.")
+        return self._as_jpeg_data_url(image_bytes)
 
-        # Composite together
-        composite = base_img.copy()
-        composite.alpha_composite(shadow, dest=(max(0, pos_x - 10), max(0, pos_y - 6)))
-        composite.alpha_composite(resized_prod, dest=(pos_x, pos_y))
+    def _as_jpeg_data_url(self, image_bytes: bytes) -> str:
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((self.MAX_REFERENCE_SIDE, self.MAX_REFERENCE_SIDE), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=88, optimize=True)
 
-        # Save to buffer
-        buf = BytesIO()
-        composite.convert("RGB").save(buf, format="JPEG", quality=92)
-        return buf.getvalue()
+        normalized = buffer.getvalue()
+        if len(normalized) > self.MAX_REFERENCE_BYTES:
+            raise ValueError("A reference photo is too large after compression.")
+        encoded = base64.b64encode(normalized).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+
+    @staticmethod
+    def _decode_generated_image(item: dict) -> bytes:
+        if not isinstance(item, dict):
+            raise TypeError("The generated image record is invalid.")
+
+        encoded = item.get("b64_json")
+        if encoded:
+            return base64.b64decode(encoded, validate=True)
+
+        image_url = item.get("url")
+        if isinstance(image_url, str) and image_url.startswith("data:image/"):
+            return base64.b64decode(image_url.split(",", 1)[1], validate=True)
+
+        raise ValueError("The AI response did not contain image bytes.")
+
+    @staticmethod
+    def _normalize_generated_image(image_bytes: bytes) -> bytes:
+        if not image_bytes:
+            raise ValueError("The generated image is empty.")
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=92, optimize=True)
+        return output.getvalue()
+
+    @staticmethod
+    def _provider_error(status_code: int, response_text: str) -> str:
+        try:
+            payload = json.loads(response_text)
+            error = payload.get("error") or payload.get("detail") or payload
+            if isinstance(error, dict):
+                message = error.get("message") or error.get("detail") or str(error)
+            else:
+                message = str(error)
+        except (json.JSONDecodeError, TypeError):
+            message = response_text.strip()
+
+        message = " ".join(message.split())[:400]
+        if status_code == 402:
+            return (
+                "OpenRouter currently has no free image-editing models. This account also needs a balance above $1 "
+                "before image requests; add credits or configure another image provider, then retry. "
+                "The selected low-cost model is Qwen Image 2.1 Turbo."
+            )
+        if status_code == 429:
+            return "The AI image service is busy. Please wait a moment and retry."
+        if "image" in message.lower() and ("reference" in message.lower() or "match" in message.lower()):
+            return "The AI model could not match the two reference photos. Try a clearer person photo and product photo."
+        return f"AI image generation failed (HTTP {status_code}). {message or 'Please retry with another photo.'}"
+
+    @staticmethod
+    def _failure(message: str, prompt: str, exc: Exception) -> dict:
+        logger.warning("Virtual try-on failed: %s", exc)
+        return {"success": False, "error": message, "prompt": prompt}

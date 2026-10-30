@@ -37,9 +37,21 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 
         return qs.order_by('-created_at')
 
+    @action(detail=False, methods=['get'])
+    def unread_count(self, request):
+        # Global announcements do not have per-user read state, so only count
+        # user-targeted notifications in the badge.
+        count = Notification.objects.filter(user=request.user, is_read=False).count()
+        return Response({'count': count})
+
     @action(detail=True, methods=['post'])
     def mark_as_read(self, request, pk=None):
         notif = self.get_object()
+        if notif.user_id != request.user.id:
+            return Response(
+                {'detail': 'Only personal notifications can be marked as read.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         notif.is_read = True
         notif.save()
         return Response({'status': 'marked as read'})

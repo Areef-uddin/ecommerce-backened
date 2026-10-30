@@ -151,4 +151,9 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# JSON requests containing a base64 encoded photo expand by about one third.
+# Keep the request limit high enough for the 10MB image limit enforced by the
+# try-on endpoint while still bounding memory use for incoming requests.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 16 * 1024 * 1024
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

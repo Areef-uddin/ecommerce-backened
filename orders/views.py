@@ -2,8 +2,10 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from decimal import Decimal
+from datetime import timedelta
 from django.utils import timezone
 from django.conf import settings
+from django.db import transaction
 import razorpay
 from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
 from .serializers import CartItemSerializer, OrderSerializer, ReturnRequestSerializer, ShipmentTrackingSerializer
@@ -50,13 +52,12 @@ class CartViewSet(viewsets.ModelViewSet):
         # Calculate discount or coupon if provided
         coupon_code = request.query_params.get('coupon')
         discount_amount = Decimal('0.00')
+        coupon_applied = False
         if coupon_code:
             coupon = Coupon.objects.filter(code__iexact=coupon_code, is_active=True).first()
             if coupon and item_total >= coupon.min_order_value:
-                discount_amount = coupon.discount_amount
-            else:
-                # default promo
-                discount_amount = Decimal('300.00')
+                discount_amount = min(coupon.discount_amount, item_total)
+                coupon_applied = True
         elif item_total > Decimal('2000.00'):
             # Default discount for demo matching screenshot (300 off)
             discount_amount = Decimal('300.00')
@@ -70,7 +71,7 @@ class CartViewSet(viewsets.ModelViewSet):
             'discount_amount': str(discount_amount),
             'delivery_charges': 'FREE' if delivery_charges == 0 else str(delivery_charges),
             'final_total': str(final_total),
-            'coupon_applied': bool(coupon_code)
+            'coupon_applied': coupon_applied
         })
 
     @action(detail=False, methods=['post'])
@@ -100,6 +101,9 @@ class CartViewSet(viewsets.ModelViewSet):
 class OrderViewSet(viewsets.ModelViewSet):
     serializer_class = OrderSerializer
     permission_classes = [permissions.IsAuthenticated]
+    # Orders can only be created as COD or by the verified payment action.
+    # Prevent generic PATCH/PUT from letting a customer edit payment/status fields.
+    http_method_names = ['get', 'post', 'head', 'options']
 
     def get_queryset(self):
         user = self.request.user
@@ -112,11 +116,44 @@ class OrderViewSet(viewsets.ModelViewSet):
         if order_status and order_status.lower() != 'all':
             if order_status.lower() == 'processing':
                 qs = qs.filter(order_status__in=['Placed', 'Order Placed', 'Confirmed', 'Packed'])
+            elif order_status.lower() == 'shipped':
+                qs = qs.filter(order_status__in=['Picked Up', 'In Transit', 'Shipped', 'Out for Delivery'])
             else:
                 qs = qs.filter(order_status__iexact=order_status)
 
         return qs
 
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def buy_again(self, request, pk=None):
+        order = self.get_object()
+        added_items = 0
+        unavailable_items = []
+        for item in order.items.select_related('product').all():
+            product = item.product
+            if not product or not product.in_stock or product.stock_quantity < 1:
+                unavailable_items.append(item.product_name)
+                continue
+
+            cart_item, created = CartItem.objects.get_or_create(
+                user=request.user,
+                product=product,
+                size=item.size,
+                color=item.color,
+                defaults={'quantity': item.quantity},
+            )
+            if not created:
+                cart_item.quantity += item.quantity
+                cart_item.save(update_fields=['quantity'])
+            added_items += 1
+
+        return Response({
+            'added_items': added_items,
+            'unavailable_items': unavailable_items,
+            'message': 'Available items were added to your cart.' if added_items else 'No items from this order are currently available.',
+        })
+
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         user = request.user
         cart_items = CartItem.objects.filter(user=user).select_related('product')
@@ -138,6 +175,11 @@ class OrderViewSet(viewsets.ModelViewSet):
             address_type = request.data.get('address_type', 'Home')
 
         payment_method = request.data.get('payment_method', 'UPI')
+        if payment_method not in ['Cash on Delivery', 'COD']:
+            return Response(
+                {'detail': 'Online orders must be completed through verified Razorpay checkout.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         coupon_code = request.data.get('coupon_code')
 
         # Compute totals
@@ -145,8 +187,8 @@ class OrderViewSet(viewsets.ModelViewSet):
         discount_amount = Decimal('0.00')
         if coupon_code:
             coupon = Coupon.objects.filter(code__iexact=coupon_code, is_active=True).first()
-            if coupon:
-                discount_amount = coupon.discount_amount
+            if coupon and item_total >= coupon.min_order_value:
+                discount_amount = min(coupon.discount_amount, item_total)
         elif item_total > Decimal('2000.00'):
             discount_amount = Decimal('300.00')
 
@@ -161,7 +203,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             address_type=address_type,
             payment_method=payment_method,
             payment_status='Pending' if payment_method in ['Cash on Delivery', 'COD'] else 'Paid',
-            order_status='Placed',
+            order_status='Order Placed',
             item_total=item_total,
             discount_amount=discount_amount,
             delivery_charges=delivery_charges,
@@ -206,8 +248,8 @@ class OrderViewSet(viewsets.ModelViewSet):
         discount_amount = Decimal('0.00')
         if coupon_code:
             coupon = Coupon.objects.filter(code__iexact=coupon_code, is_active=True).first()
-            if coupon:
-                discount_amount = coupon.discount_amount
+            if coupon and item_total >= coupon.min_order_value:
+                discount_amount = min(coupon.discount_amount, item_total)
         elif item_total > Decimal('2000.00'):
             discount_amount = Decimal('300.00')
 
@@ -215,12 +257,26 @@ class OrderViewSet(viewsets.ModelViewSet):
         total_amount = max(Decimal('1.00'), item_total - discount_amount + delivery_charges)
         amount_in_paise = int(total_amount * 100)
 
+        if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+            if settings.DEBUG:
+                return Response({
+                    'razorpay_order_id': f"order_sim_{int(timezone.now().timestamp())}",
+                    'amount': amount_in_paise,
+                    'currency': 'INR',
+                    'key_id': '',
+                    'total_amount': str(total_amount),
+                    'simulated': True,
+                })
+            return Response(
+                {'detail': 'Online payments are not configured. Please choose Cash on Delivery.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         try:
             client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
             razorpay_order = client.order.create({
                 'amount': amount_in_paise,
                 'currency': 'INR',
-                'payment_capture': 1,
                 'notes': {
                     'user_id': str(user.id),
                     'user_email': user.email,
@@ -235,17 +291,22 @@ class OrderViewSet(viewsets.ModelViewSet):
             })
         except Exception as e:
             print(f"Razorpay order create error: {e}")
-            # Fallback for simulator
-            return Response({
-                'razorpay_order_id': f"order_sim_{int(timezone.now().timestamp())}",
-                'amount': amount_in_paise,
-                'currency': 'INR',
-                'key_id': settings.RAZORPAY_KEY_ID,
-                'total_amount': str(total_amount),
-                'simulated': True
-            })
+            if settings.DEBUG:
+                return Response({
+                    'razorpay_order_id': f"order_sim_{int(timezone.now().timestamp())}",
+                    'amount': amount_in_paise,
+                    'currency': 'INR',
+                    'key_id': '',
+                    'total_amount': str(total_amount),
+                    'simulated': True,
+                })
+            return Response(
+                {'detail': 'Razorpay could not create the payment order. Please retry or choose Cash on Delivery.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
     @action(detail=False, methods=['post'])
+    @transaction.atomic
     def verify_razorpay_payment(self, request):
         user = request.user
         razorpay_payment_id = request.data.get('razorpay_payment_id', '')
@@ -253,56 +314,95 @@ class OrderViewSet(viewsets.ModelViewSet):
         razorpay_signature = request.data.get('razorpay_signature', '')
 
         is_paid = False
-        key_id = os.environ.get('RAZORPAY_KEY_ID', 'rzp_test_Tt3TjWZ9FqBAW6')
-        key_secret = os.environ.get('RAZORPAY_KEY_SECRET', '3rEsnPCdmNjRsSGcclXyhWEe')
-
-        # 1. Direct Razorpay Payment Fetch Verification
-        if razorpay_payment_id and not str(razorpay_order_id).startswith('order_sim_'):
+        client = None
+        if str(razorpay_order_id).startswith('order_sim_'):
+            # Simulated orders are development-only. Never turn an unverified
+            # client callback into a paid production order.
+            is_paid = settings.DEBUG
+        elif not (razorpay_order_id and razorpay_payment_id and razorpay_signature):
+            return Response(
+                {'detail': 'Razorpay did not return all payment verification fields. Please retry or choose Cash on Delivery.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        elif not (settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET):
+            return Response(
+                {'detail': 'Online payment verification is not configured. Please choose Cash on Delivery.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        else:
             try:
-                client = razorpay.Client(auth=(key_id, key_secret))
-                pay = client.payment.fetch(razorpay_payment_id)
-                if pay.get('status') in ['captured', 'authorized']:
-                    is_paid = True
-                    print(f"[Razorpay Verify] Payment {razorpay_payment_id} verified as {pay.get('status')}!")
-            except Exception as e:
-                print(f"[Razorpay Fetch Payment Error]: {e}")
-
-        # 2. Direct Razorpay Server Order Status
-        if not is_paid and razorpay_order_id and not str(razorpay_order_id).startswith('order_sim_'):
-            try:
-                client = razorpay.Client(auth=(key_id, key_secret))
-                rz_order = client.order.fetch(razorpay_order_id)
-                if rz_order.get('status') == 'paid':
-                    is_paid = True
-                    print(f"[Razorpay Verify] Order {razorpay_order_id} verified as PAID via Razorpay server!")
-            except Exception as e:
-                print(f"[Razorpay Fetch Order Error]: {e}")
-
-        # 3. Signature verification fallback
-        if not is_paid and razorpay_signature and razorpay_order_id and not str(razorpay_order_id).startswith('order_sim_'):
-            try:
-                client = razorpay.Client(auth=(key_id, key_secret))
+                client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
                 client.utility.verify_payment_signature({
                     'razorpay_order_id': razorpay_order_id,
                     'razorpay_payment_id': razorpay_payment_id,
-                    'razorpay_signature': razorpay_signature
+                    'razorpay_signature': razorpay_signature,
                 })
                 is_paid = True
-                print(f"[Razorpay Verify] Signature verified successfully for {razorpay_order_id}!")
             except Exception as e:
                 print(f"[Razorpay Signature Verification Error]: {e}")
 
-        # 4. Authentic Razorpay Checkout JS ID Callback Confirmation
-        if not is_paid and razorpay_payment_id and razorpay_payment_id.startswith('pay_'):
-            is_paid = True
-            print(f"[Razorpay Verify] Confirmed authentic payment {razorpay_payment_id} from client SDK callback!")
-
-        # 5. Simulator fallback
-        if str(razorpay_order_id).startswith('order_sim_'):
-            is_paid = True
-
         if not is_paid:
             return Response({'detail': 'Payment could not be verified with Razorpay.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment_reference = razorpay_payment_id or f"sim:{razorpay_order_id}"
+        existing_order = Order.objects.filter(user=user, payment_reference=payment_reference).first()
+        if existing_order:
+            return Response(self.get_serializer(existing_order).data, status=status.HTTP_200_OK)
+
+        cart_items = list(CartItem.objects.filter(user=user).select_related('product'))
+        if not cart_items:
+            return Response(
+                {'detail': 'Your cart is empty. The payment was not turned into an order; please contact support.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        coupon_code = request.data.get('coupon_code')
+        item_total = sum(item.product.price * item.quantity for item in cart_items)
+        discount_amount = Decimal('0.00')
+        if coupon_code:
+            coupon = Coupon.objects.filter(code__iexact=coupon_code, is_active=True).first()
+            if coupon and item_total >= coupon.min_order_value:
+                discount_amount = min(coupon.discount_amount, item_total)
+        elif item_total > Decimal('2000.00'):
+            discount_amount = Decimal('300.00')
+
+        expected_amount_paise = int(max(Decimal('1.00'), item_total - discount_amount) * 100)
+        if str(razorpay_order_id).startswith('order_sim_'):
+            if not settings.DEBUG:
+                return Response({'detail': 'Simulated payments are disabled.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            try:
+                gateway_order = client.order.fetch(razorpay_order_id)
+                gateway_payment = client.payment.fetch(razorpay_payment_id)
+                if (
+                    str((gateway_order.get('notes') or {}).get('user_id')) != str(user.id)
+                    or int(gateway_order.get('amount', -1)) != expected_amount_paise
+                    or gateway_order.get('currency') != 'INR'
+                    or gateway_payment.get('order_id') != razorpay_order_id
+                    or gateway_payment.get('status') not in ['authorized', 'captured']
+                    or int(gateway_payment.get('amount', -1)) != expected_amount_paise
+                    or gateway_payment.get('currency') != 'INR'
+                ):
+                    return Response(
+                        {'detail': 'The captured payment does not match this account and current cart total.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if gateway_payment.get('status') == 'authorized':
+                    gateway_payment = client.payment.capture(razorpay_payment_id, {
+                        'amount': expected_amount_paise,
+                        'currency': 'INR',
+                    })
+                if gateway_payment.get('status') != 'captured':
+                    return Response(
+                        {'detail': 'Payment is authorized but not captured yet. Retry verification in a few seconds.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            except Exception as e:
+                print(f"[Razorpay Payment/Order Verification Error]: {e}")
+                return Response(
+                    {'detail': 'Razorpay confirmed the checkout but could not finish capture/verification. Retry verification; do not pay again.'},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
 
         # Build order
         address_id = request.data.get('address_id')
@@ -319,36 +419,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             delivery_address = request.data.get('delivery_address', '12-3-456, MG Road, Bengaluru - 560001')
             address_type = request.data.get('address_type', 'Home')
 
-        cart_items = CartItem.objects.filter(user=user).select_related('product')
-        product_id = request.data.get('product_id')
-
-        # If cart is empty, try to get product from request or find last placed order
-        if not cart_items.exists():
-            if product_id:
-                p = Product.objects.filter(id=product_id).first()
-                if p:
-                    ci = CartItem.objects.create(user=user, product=p, quantity=int(request.data.get('quantity', 1)))
-                    cart_items = CartItem.objects.filter(id=ci.id).select_related('product')
-            else:
-                last_order = Order.objects.filter(user=user).order_by('-created_at').first()
-                if last_order:
-                    serializer = self.get_serializer(last_order)
-                    return Response(serializer.data, status=status.HTTP_200_OK)
-                p = Product.objects.first()
-                if p:
-                    ci = CartItem.objects.create(user=user, product=p, quantity=1)
-                    cart_items = CartItem.objects.filter(id=ci.id).select_related('product')
-
-        coupon_code = request.data.get('coupon_code')
-        item_total = sum(item.product.price * item.quantity for item in cart_items)
-        discount_amount = Decimal('0.00')
-        if coupon_code:
-            coupon = Coupon.objects.filter(code__iexact=coupon_code, is_active=True).first()
-            if coupon:
-                discount_amount = coupon.discount_amount
-        elif item_total > Decimal('2000.00'):
-            discount_amount = Decimal('300.00')
-
         delivery_charges = Decimal('0.00')
         total_amount = max(Decimal('1.00'), item_total - discount_amount + delivery_charges)
 
@@ -360,7 +430,8 @@ class OrderViewSet(viewsets.ModelViewSet):
             address_type=address_type,
             payment_method='Razorpay',
             payment_status='Paid',
-            order_status='Placed',
+            order_status='Order Placed',
+            payment_reference=payment_reference,
             item_total=item_total,
             discount_amount=discount_amount,
             delivery_charges=delivery_charges,
@@ -387,7 +458,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         courier_provider.create_shipment(order)
 
         # Clear cart
-        cart_items.delete()
+        CartItem.objects.filter(id__in=[item.id for item in cart_items]).delete()
 
         serializer = self.get_serializer(order)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -491,6 +562,7 @@ class OrderViewSet(viewsets.ModelViewSet):
 class ReturnRequestViewSet(viewsets.ModelViewSet):
     serializer_class = ReturnRequestSerializer
     permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'head', 'options']
 
     def get_queryset(self):
         if self.request.user.is_staff:
@@ -507,6 +579,20 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
         if not order:
             return Response({'detail': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        if order.order_status != 'Delivered':
+            return Response({'detail': 'Returns can only be requested after delivery.'}, status=status.HTTP_400_BAD_REQUEST)
+        delivered_at = order.updated_at
+        try:
+            delivered_event = order.shipment.milestones.filter(
+                status_step='Delivered', is_completed=True
+            ).first()
+            if delivered_event and delivered_event.timestamp:
+                delivered_at = delivered_event.timestamp
+        except ShipmentTracking.DoesNotExist:
+            pass
+        if delivered_at < timezone.now() - timedelta(days=7):
+            return Response({'detail': 'The 7-day return window for this order has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+
         order_item = OrderItem.objects.filter(id=order_item_id, order=order).first()
         if not order_item:
             # Fallback to first item if not provided
@@ -514,13 +600,76 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
             if not order_item:
                 return Response({'detail': 'Order item not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        if order_item.return_requests.exclude(status='Rejected').exists():
+            return Response({'detail': 'A return has already been requested for this item.'}, status=status.HTTP_409_CONFLICT)
+
+        item_subtotal = order_item.price * order_item.quantity
+        item_discount = (
+            (order.discount_amount * item_subtotal / order.item_total).quantize(Decimal('0.01'))
+            if order.item_total > 0 else Decimal('0.00')
+        )
+        refund_amount = max(Decimal('0.00'), item_subtotal - item_discount)
+
         return_obj = ReturnRequest.objects.create(
             order=order,
             order_item=order_item,
             reason=reason,
             pickup_type=pickup_type,
             status='Initiated',
-            refund_amount=order_item.price * order_item.quantity
+            refund_amount=refund_amount
         )
         serializer = self.get_serializer(return_obj)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    @transaction.atomic
+    def update_status(self, request, pk=None):
+        return_request = self.get_object()
+        new_status = request.data.get('status')
+        allowed = ['Pickup Scheduled', 'Pickup Received', 'Refund Processed', 'Rejected']
+        if new_status not in allowed:
+            return Response({'detail': f"Choose one of: {', '.join(allowed)}."}, status=status.HTTP_400_BAD_REQUEST)
+        if return_request.status in ['Refund Processed', 'Rejected']:
+            return Response({'detail': 'This return request is already closed.'}, status=status.HTTP_409_CONFLICT)
+        if new_status == 'Pickup Scheduled' and return_request.status != 'Initiated':
+            return Response({'detail': 'Pickup can only be scheduled for a newly initiated return.'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_status == 'Pickup Received' and not (
+            return_request.status == 'Pickup Scheduled'
+            or (return_request.status == 'Initiated' and return_request.pickup_type.lower().startswith('drop'))
+        ):
+            return Response({'detail': 'Confirm receipt only after a pickup is scheduled or a drop-off is received.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = return_request.order
+        if new_status == 'Refund Processed' and order.payment_method == 'Razorpay':
+            if return_request.status != 'Pickup Received':
+                return Response({'detail': 'Confirm receipt of the returned item before issuing the refund.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not order.payment_reference:
+                return Response({'detail': 'No captured Razorpay payment is linked to this order.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+                client.payment.refund(order.payment_reference, {
+                    'amount': int(return_request.refund_amount * 100),
+                    'notes': {'return_request_id': str(return_request.id)},
+                })
+            except Exception as e:
+                print(f"[Razorpay Refund Error]: {e}")
+                return Response({'detail': 'Razorpay could not process the refund. The request remains open.'}, status=status.HTTP_502_BAD_GATEWAY)
+        elif new_status == 'Refund Processed' and order.payment_method in ['Cash on Delivery', 'COD']:
+            if return_request.status != 'Pickup Received':
+                return Response({'detail': 'Confirm receipt of the returned item before confirming the refund.'}, status=status.HTTP_400_BAD_REQUEST)
+            if request.data.get('manual_refund_confirmed') is not True:
+                return Response(
+                    {'detail': 'Transfer the COD refund manually, then confirm manual_refund_confirmed.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        return_request.status = new_status
+        return_request.save(update_fields=['status'])
+        if new_status == 'Refund Processed':
+            refunded = sum(
+                (r.refund_amount for r in order.returns.filter(status='Refund Processed')),
+                Decimal('0.00'),
+            )
+            order.payment_status = 'Refunded' if refunded >= (order.item_total - order.discount_amount) else 'Partially Refunded'
+            order.save(update_fields=['payment_status', 'updated_at'])
+        return Response(self.get_serializer(return_request).data)

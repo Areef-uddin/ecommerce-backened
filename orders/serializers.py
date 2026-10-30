@@ -81,8 +81,10 @@ class OrderSerializer(serializers.ModelSerializer):
 class ReturnRequestSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='order_item.product_name', read_only=True)
     order_number = serializers.CharField(source='order.order_number', read_only=True)
+    customer_name = serializers.CharField(source='order.customer_name', read_only=True)
+    payment_method = serializers.CharField(source='order.payment_method', read_only=True)
 
     class Meta:
         model = ReturnRequest
-        fields = ('id', 'order', 'order_number', 'order_item', 'product_name', 'reason', 'pickup_type', 'status', 'refund_amount', 'created_at')
-        read_only_fields = ('id', 'created_at')
+        fields = ('id', 'order', 'order_number', 'customer_name', 'payment_method', 'order_item', 'product_name', 'reason', 'pickup_type', 'status', 'refund_amount', 'created_at')
+        read_only_fields = ('id', 'created_at', 'status', 'refund_amount')

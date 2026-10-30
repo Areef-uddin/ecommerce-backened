@@ -8,3 +8,5 @@ venv/
 staticfiles/
 media/
 *.log
+model_weights/
+weights/

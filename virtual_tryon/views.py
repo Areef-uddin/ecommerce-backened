@@ -3,6 +3,7 @@ import base64
 import uuid
 import logging
 import traceback
+from io import BytesIO
 from django.utils import timezone
 from django.core.files.base import ContentFile
 from django.conf import settings
@@ -11,12 +12,14 @@ from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
+from PIL import Image
 from products.models import Product
 from .models import TryOnJob
 from .serializers import TryOnJobSerializer
 from ai_services.virtual_tryon import VirtualTryOnService
 
 logger = logging.getLogger(__name__)
+MAX_USER_IMAGE_BYTES = 10 * 1024 * 1024
 
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
@@ -87,6 +90,21 @@ def generate_tryon_view(request):
 
         if not raw_user_bytes:
             return Response({'detail': 'Could not decode photo bytes.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(raw_user_bytes) > MAX_USER_IMAGE_BYTES:
+            return Response(
+                {'detail': 'Photo is too large. Please upload an image under 10MB.'},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        try:
+            with Image.open(BytesIO(raw_user_bytes)) as uploaded_image:
+                uploaded_image.verify()
+        except Exception:
+            return Response(
+                {'detail': 'The uploaded file is not a supported or readable image. Try a JPG, PNG, or WebP photo.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Canonical product image URL
         prod_img_obj = product.images.first()
