@@ -142,6 +142,7 @@ class ReturnRequest(models.Model):
         ('Initiated', 'Initiated'),
         ('Pickup Scheduled', 'Pickup Scheduled'),
         ('Pickup Received', 'Pickup Received'),
+        ('Refund Pending', 'Refund Pending'),
         ('Refund Processed', 'Refund Processed'),
         ('Rejected', 'Rejected'),
     )
@@ -152,6 +153,7 @@ class ReturnRequest(models.Model):
     pickup_type = models.CharField(max_length=20, default='Pickup')  # Pickup or Drop
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='Initiated')
     refund_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    gateway_refund_id = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

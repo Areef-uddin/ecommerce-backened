@@ -289,6 +289,71 @@ class CourierTrackingSystemTestCase(TestCase):
         self.assertEqual(refreshed_order.data['returns'][0]['status'], 'Refund Processed')
         self.assertEqual(Notification.objects.filter(user=self.customer1).count(), 4)
 
+    def test_razorpay_refund_stays_pending_until_gateway_confirms_processing(self):
+        category = Category.objects.create(name='Online Return', slug='online-return')
+        product = Product.objects.create(
+            name='Online return item', slug='online-return-item', category=category,
+            description='Online return test item', price=250,
+        )
+        order = Order.objects.create(
+            user=self.customer1,
+            customer_name='Priya Sharma',
+            phone='+91 9876543210',
+            delivery_address='123 Fashion Street, Bengaluru',
+            item_total=250,
+            total_amount=250,
+            payment_method='Razorpay',
+            payment_status='Paid',
+            payment_reference='pay_return_test',
+            order_status='Order Placed',
+        )
+        item = OrderItem.objects.create(order=order, product=product, product_name=product.name, price=250)
+        shipment = self.provider.create_shipment(order)
+        self.provider.update_status(shipment.tracking_number, 'Delivered')
+
+        self.client.force_authenticate(user=self.customer1)
+        created = self.client.post('/api/orders/returns/', {
+            'order_id': order.id,
+            'order_item_id': item.id,
+            'reason': 'Defective',
+            'pickup_type': 'Pickup',
+        }, format='json')
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        return_id = created.data['id']
+
+        self.client.force_authenticate(user=self.admin_user)
+        self.client.post(f'/api/orders/returns/{return_id}/update_status/', {'status': 'Pickup Scheduled'}, format='json')
+        self.client.post(f'/api/orders/returns/{return_id}/update_status/', {'status': 'Pickup Received'}, format='json')
+        with override_settings(RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test-secret'):
+            with patch('orders.views.razorpay.Client') as client_factory:
+                gateway = client_factory.return_value
+                gateway.payment.refund.return_value = {'id': 'rfnd_return_test', 'status': 'pending'}
+                pending = self.client.post(
+                    f'/api/orders/returns/{return_id}/update_status/',
+                    {'status': 'Refund Processed'}, format='json',
+                )
+                self.assertEqual(pending.status_code, status.HTTP_200_OK)
+                self.assertEqual(pending.data['status'], 'Refund Pending')
+                self.assertEqual(gateway.payment.refund.call_args.args[0], 'pay_return_test')
+
+                gateway.refund.fetch.return_value = {'id': 'rfnd_return_test', 'status': 'pending'}
+                still_pending = self.client.post(
+                    f'/api/orders/returns/{return_id}/update_status/',
+                    {'status': 'Refund Processed'}, format='json',
+                )
+                self.assertEqual(still_pending.status_code, status.HTTP_202_ACCEPTED)
+
+                gateway.refund.fetch.return_value = {'id': 'rfnd_return_test', 'status': 'processed'}
+                processed = self.client.post(
+                    f'/api/orders/returns/{return_id}/update_status/',
+                    {'status': 'Refund Processed'}, format='json',
+                )
+                self.assertEqual(processed.status_code, status.HTTP_200_OK)
+                self.assertEqual(processed.data['status'], 'Refund Processed')
+
+        order.refresh_from_db()
+        self.assertEqual(order.payment_status, 'Refunded')
+
     def test_authorized_razorpay_payment_is_captured_and_retry_is_idempotent(self):
         category = Category.objects.create(name='Payment Test', slug='payment-test')
         product = Product.objects.create(

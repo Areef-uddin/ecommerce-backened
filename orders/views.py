@@ -659,20 +659,34 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Confirm receipt only after a pickup is scheduled or a drop-off is received.'}, status=status.HTTP_400_BAD_REQUEST)
 
         order = return_request.order
+        recorded_status = new_status
         if new_status == 'Refund Processed' and order.payment_method == 'Razorpay':
-            if return_request.status != 'Pickup Received':
-                return Response({'detail': 'Confirm receipt of the returned item before issuing the refund.'}, status=status.HTTP_400_BAD_REQUEST)
-            if not order.payment_reference:
-                return Response({'detail': 'No captured Razorpay payment is linked to this order.'}, status=status.HTTP_400_BAD_REQUEST)
             try:
                 client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-                client.payment.refund(order.payment_reference, {
-                    'amount': int(return_request.refund_amount * 100),
-                    'notes': {'return_request_id': str(return_request.id)},
-                })
+                if return_request.status == 'Pickup Received':
+                    if not order.payment_reference:
+                        return Response({'detail': 'No captured Razorpay payment is linked to this order.'}, status=status.HTTP_400_BAD_REQUEST)
+                    refund = client.payment.refund(order.payment_reference, {
+                        'amount': int(return_request.refund_amount * 100),
+                        'notes': {'return_request_id': str(return_request.id)},
+                    })
+                    return_request.gateway_refund_id = str(refund.get('id', ''))
+                    if refund.get('status') != 'processed':
+                        recorded_status = 'Refund Pending'
+                elif return_request.status == 'Refund Pending':
+                    if not return_request.gateway_refund_id:
+                        return Response({'detail': 'Refund reference is missing. Please contact support.'}, status=status.HTTP_409_CONFLICT)
+                    refund = client.refund.fetch(return_request.gateway_refund_id)
+                    if refund.get('status') != 'processed':
+                        return Response(
+                            {'detail': 'Razorpay is still processing this refund. The request will remain pending.'},
+                            status=status.HTTP_202_ACCEPTED,
+                        )
+                else:
+                    return Response({'detail': 'Confirm receipt of the returned item before issuing the refund.'}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 print(f"[Razorpay Refund Error]: {e}")
-                return Response({'detail': 'Razorpay could not process the refund. The request remains open.'}, status=status.HTTP_502_BAD_GATEWAY)
+                return Response({'detail': 'Razorpay could not verify or process the refund. The request remains open.'}, status=status.HTTP_502_BAD_GATEWAY)
         elif new_status == 'Refund Processed' and order.payment_method in ['Cash on Delivery', 'COD']:
             if return_request.status != 'Pickup Received':
                 return Response({'detail': 'Confirm receipt of the returned item before confirming the refund.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -681,28 +695,34 @@ class ReturnRequestViewSet(viewsets.ModelViewSet):
                     {'detail': 'Transfer the COD refund manually, then confirm manual_refund_confirmed.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+        elif new_status == 'Refund Processed':
+            return Response({'detail': 'This payment method cannot be refunded automatically. Contact support.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        return_request.status = new_status
-        return_request.save(update_fields=['status'])
+        return_request.status = recorded_status
+        return_request.save(update_fields=['status', 'gateway_refund_id'])
         status_notes = {
             'Pickup Scheduled': 'Pickup has been scheduled for your return.',
             'Pickup Received': 'The returned item has been received and is being checked.',
+            'Refund Pending': 'Razorpay accepted the refund request. The bank is still processing it.',
             'Refund Processed': f'Refund of ₹{return_request.refund_amount} has been processed.',
             'Rejected': 'The return request was rejected. Contact support if you need help.',
         }
         ReturnTimeline.objects.create(
             return_request=return_request,
-            status=new_status,
-            note=status_notes[new_status],
+            status=recorded_status,
+            note=status_notes[recorded_status],
         )
         Notification.objects.create(
             user=order.user,
-            title=f'Return update: {new_status}',
-            message=f'{return_request.order_item.product_name}: {status_notes[new_status]}',
+            title=f'Return update: {recorded_status}',
+            message=f'{return_request.order_item.product_name}: {status_notes[recorded_status]}',
             category='orders',
             icon='rotate-ccw',
         )
-        if new_status == 'Refund Processed':
+        if recorded_status == 'Refund Pending':
+            order.payment_status = 'Refund Pending'
+            order.save(update_fields=['payment_status', 'updated_at'])
+        elif recorded_status == 'Refund Processed':
             refunded = sum(
                 (r.refund_amount for r in order.returns.filter(status='Refund Processed')),
                 Decimal('0.00'),
