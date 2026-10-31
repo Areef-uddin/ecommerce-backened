@@ -18,3 +18,4 @@ urlpatterns = [
     path('rewards/', MyReferralRewardsView.as_view(), name='referral-rewards'),
     path('whatsapp/webhook/', TwilioWhatsAppWebhookView.as_view(), name='referral-whatsapp-webhook'),
 ]
+

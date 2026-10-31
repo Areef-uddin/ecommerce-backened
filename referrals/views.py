@@ -53,7 +53,7 @@ class MyReferralStatsView(APIView):
 
         serializer = ReferralStatsSerializer({
             'referral_code': ref_obj.code,
-            'referral_link': ref_obj.get_referral_link(request.build_absolute_uri('/')),
+            'referral_link': ref_obj.get_referral_link(),
             'total_invites': total_invites,
             'successful_referrals': successful_referrals,
             'pending_referrals': pending_referrals,
@@ -136,3 +136,4 @@ class TwilioWhatsAppWebhookView(APIView):
             return Response({'status': 'opted_out'}, status=status.HTTP_200_OK)
 
         return Response({'status': 'received', 'message_sid': message_sid}, status=status.HTTP_200_OK)
+

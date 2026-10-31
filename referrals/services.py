@@ -316,3 +316,4 @@ class ReferralService:
                 notes=f"Voided due to order {order.order_number} cancellation."
             )
             logger.info(f"Reverted referral qualification for order {order.order_number}.")
+

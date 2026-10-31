@@ -37,3 +37,4 @@ class ReferralNotificationAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'channel', 'recipient_phone', 'status', 'twilio_message_sid', 'created_at')
     search_fields = ('user__email', 'recipient_phone', 'twilio_message_sid')
     list_filter = ('channel', 'status', 'created_at')
+

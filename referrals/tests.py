@@ -154,3 +154,4 @@ class ReferralSystemTests(TestCase):
         self.assertEqual(len(res_list.data['results']), 1)
         # Check privacy masking
         self.assertIn('*', res_list.data['results'][0]['friend_name'])
+

@@ -24,9 +24,7 @@ class ReferralCodeSerializer(serializers.ModelSerializer):
         fields = ('code', 'referral_link', 'is_active', 'created_at')
 
     def get_referral_link(self, obj):
-        request = self.context.get('request')
-        base_url = request.build_absolute_uri('/') if request else None
-        return obj.get_referral_link(base_url)
+        return obj.get_referral_link()
 
 
 class ReferralStatsSerializer(serializers.Serializer):
@@ -77,3 +75,4 @@ class ValidateReferralCodeSerializer(serializers.Serializer):
 
 class ApplyReferralCodeSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=20, required=True)
+

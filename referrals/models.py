@@ -42,8 +42,8 @@ class ReferralCode(models.Model):
             ref_obj.save(update_fields=['code'])
         return ref_obj
 
-    def get_referral_link(self, base_url=None):
-        base = base_url or getattr(settings, 'REFERRAL_BASE_URL', 'https://ecommerce-customerapp.vercel.app')
+    def get_referral_link(self, frontend_url=None):
+        base = frontend_url or getattr(settings, 'REFERRAL_FRONTEND_URL', getattr(settings, 'REFERRAL_BASE_URL', 'https://ecommerce-customerapp.vercel.app'))
         base = base.rstrip('/')
         return f"{base}/#/register?ref={self.code}"
 
@@ -194,3 +194,4 @@ class ReferralConfig(models.Model):
                 is_active=True
             )
         return cfg
+
