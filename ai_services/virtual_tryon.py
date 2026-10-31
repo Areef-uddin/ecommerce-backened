@@ -110,8 +110,8 @@ class VirtualTryOnService:
         if len(user_image_bytes) > self.MAX_REFERENCE_BYTES:
             return {"success": False, "error": "The customer's photo is too large. Upload a photo under 10MB.", "prompt": prompt}
 
-        # If OpenRouter is explicitly chosen and has a configured API key, attempt it
-        if self.provider == "openrouter" and self.api_key:
+        # If OpenRouter has a configured API key, attempt it first with qwen/qwen-image-2.1-turbo
+        if self.api_key and self.provider != "local":
             try:
                 result = self._process_openrouter_tryon(
                     user_image_bytes,
@@ -122,12 +122,12 @@ class VirtualTryOnService:
                 if result.get("success"):
                     return result
                 logger.warning(
-                    "OpenRouter generation returned unsuccess: %s. Falling back to open-source local VTON engine.",
+                    "OpenRouter generation returned unsuccess: %s. Safely falling back to local open-source VTON engine.",
                     result.get("error"),
                 )
             except Exception as exc:
                 logger.warning(
-                    "OpenRouter request error (%s). Falling back to open-source local VTON engine.",
+                    "OpenRouter request error (%s). Safely falling back to local open-source VTON engine.",
                     exc,
                 )
 

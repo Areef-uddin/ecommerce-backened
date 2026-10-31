@@ -239,6 +239,13 @@ class OrderViewSet(viewsets.ModelViewSet):
         # Clear cart
         cart_items.delete()
 
+        # Process referral qualification
+        try:
+            from referrals.services import ReferralService
+            ReferralService.process_order_qualification(order)
+        except Exception as ref_err:
+            print(f"[Referral Qualification Error in COD create]: {ref_err}")
+
         serializer = self.get_serializer(order)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -455,6 +462,13 @@ class OrderViewSet(viewsets.ModelViewSet):
         # Clear cart
         CartItem.objects.filter(id__in=[item.id for item in cart_items]).delete()
 
+        # Process referral qualification
+        try:
+            from referrals.services import ReferralService
+            ReferralService.process_order_qualification(order)
+        except Exception as ref_err:
+            print(f"[Referral Qualification Error in online payment verify]: {ref_err}")
+
         serializer = self.get_serializer(order)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -549,6 +563,11 @@ class OrderViewSet(viewsets.ModelViewSet):
         order.order_status = 'Cancelled'
         order.payment_status = 'Cancelled'
         order.save()
+        try:
+            from referrals.services import ReferralService
+            ReferralService.handle_order_cancellation(order)
+        except Exception as ref_err:
+            print(f"[Referral Cancellation Revert Error]: {ref_err}")
         return Response(self.get_serializer(order).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'])

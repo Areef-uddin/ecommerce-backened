@@ -18,6 +18,8 @@ class TryOnJobSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'status', 'result_image', 'result_image_url', 'created_at', 'completed_at')
 
     def get_user_image_url(self, obj):
+        if obj.metadata and obj.metadata.get('user_image_b64'):
+            return obj.metadata['user_image_b64']
         if obj.user_image:
             request = self.context.get('request')
             if request:
@@ -26,10 +28,12 @@ class TryOnJobSerializer(serializers.ModelSerializer):
         return ""
 
     def get_result_display_url(self, obj):
+        if obj.result_image_url:
+            return obj.result_image_url
         if obj.result_image:
             request = self.context.get('request')
             if request:
                 return request.build_absolute_uri(obj.result_image.url)
             return obj.result_image.url
-        return obj.result_image_url or ""
+        return ""
 

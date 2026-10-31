@@ -13,10 +13,11 @@ class UserSerializer(serializers.ModelSerializer):
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=6)
     phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    referral_code = serializers.CharField(required=False, allow_blank=True, write_only=True)
 
     class Meta:
         model = User
-        fields = ('email', 'phone', 'first_name', 'last_name', 'password')
+        fields = ('email', 'phone', 'first_name', 'last_name', 'password', 'referral_code')
 
     def validate_phone(self, value):
         if not value or not str(value).strip():
@@ -35,9 +36,19 @@ class RegisterSerializer(serializers.ModelSerializer):
         return val
 
     def create(self, validated_data):
+        ref_code = validated_data.pop('referral_code', None)
         if not validated_data.get('phone'):
             validated_data['phone'] = None
-        return User.objects.create_user(**validated_data)
+        user = User.objects.create_user(**validated_data)
+        try:
+            from referrals.models import ReferralCode
+            from referrals.services import ReferralService
+            ReferralCode.get_or_create_for_user(user)
+            if ref_code:
+                ReferralService.apply_referral_code(user, ref_code)
+        except Exception:
+            pass
+        return user
 
 
 class AddressSerializer(serializers.ModelSerializer):

@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'orders',
     'common',
     'virtual_tryon',
+    'referrals',
 ]
 
 AUTH_USER_MODEL = 'accounts.User'

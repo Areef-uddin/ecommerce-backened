@@ -141,13 +141,15 @@ def generate_tryon_view(request):
         if result.get('success') and result.get('image_bytes'):
             result_bytes = result['image_bytes']
             result_filename = f"tryon_res_{job.id}_{uuid.uuid4().hex[:8]}.jpg"
+            b64_res = base64.b64encode(result_bytes).decode('utf-8')
+            job.result_image_url = f"data:image/jpeg;base64,{b64_res}"
+            if raw_user_bytes:
+                b64_user = base64.b64encode(raw_user_bytes).decode('utf-8')
+                job.metadata['user_image_b64'] = f"data:image/jpeg;base64,{b64_user}"
             try:
                 job.result_image.save(result_filename, ContentFile(result_bytes), save=False)
             except Exception as e:
-                # If disk save fails, save as data URI in result_image_url
                 logger.warning(f"Result image disk save error: {e}")
-                b64_res = base64.b64encode(result_bytes).decode('utf-8')
-                job.result_image_url = f"data:image/jpeg;base64,{b64_res}"
 
             job.status = 'completed'
             job.completed_at = timezone.now()
