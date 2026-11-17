@@ -91,21 +91,21 @@ fi
 /var/www/ecommerce/backend/venv/bin/pip install -r requirements.txt
 /var/www/ecommerce/backend/venv/bin/pip install gunicorn pillow psycopg2-binary
 
-# Create .env if not exists
-if [ ! -f "/var/www/ecommerce/backend/.env" ]; then
-    echo "📝 Creating production .env for Backend..."
-    cat << 'EOF' > /var/www/ecommerce/backend/.env
+# Create or Update .env with verified production credentials
+echo "📝 Writing production .env for Backend..."
+cat << 'EOF' > /var/www/ecommerce/backend/.env
 DEBUG=False
 SECRET_KEY=django-insecure-pro-ecom-webyne-vps-secure-key-2026!@#$%^
 ALLOWED_HOSTS=157.15.203.209,localhost,127.0.0.1
-DATABASE_URL=postgresql://neondb_owner:npg_1kO4tcfQYmXy@ep-muddy-recipe-b4aa0hey-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL=postgresql://neondb_owner:npg_THJfOw3sWN8v@ep-muddy-recipe-b4aa0hey-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require
 CORS_ALLOW_ALL=True
 FRONTEND_URL=http://157.15.203.209
 TRYON_PROVIDER=auto
 TRYON_IMAGE_MODEL=qwen/qwen-image-2.1-turbo
+RAZORPAY_KEY_ID=rzp_test_Tt3TjWZ9FqBAW6
+RAZORPAY_KEY_SECRET=3rEsnPCdmNjRsSGcclXyhWEe
 EOF
-    chmod 600 /var/www/ecommerce/backend/.env
-fi
+chmod 600 /var/www/ecommerce/backend/.env
 
 # 6. Run Migrations & Collect Static Files
 echo "🗄️ Running database migrations & collecting static files..."
