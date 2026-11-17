@@ -13,7 +13,6 @@ echo "=========================================================="
 # 1. Update system packages
 echo "📦 Updating system packages..."
 apt-get update -y
-apt-get upgrade -y
 apt-get install -y \
     curl \
     git \
@@ -24,7 +23,8 @@ apt-get install -y \
     python3-venv \
     libpq-dev \
     build-essential \
-    unzip
+    unzip \
+    tar
 
 # 2. Install Node.js (v20 LTS) for React Admin Panel
 if ! command -v node &> /dev/null; then
@@ -33,40 +33,50 @@ if ! command -v node &> /dev/null; then
     apt-get install -y nodejs
 fi
 
-# 3. Create Application Directory Structure
-echo "📁 Setting up /var/www/ecommerce directories..."
+# 3. Clone or Update Repositories
 mkdir -p /var/www/ecommerce
+cd /var/www/ecommerce
+
+# Backend
+if [ -d "/var/www/ecommerce/backend/.git" ]; then
+    echo "🔄 Pulling latest Backend changes..."
+    cd /var/www/ecommerce/backend && git pull origin main
+else
+    echo "📥 Cloning Backend Repository..."
+    rm -rf /var/www/ecommerce/backend
+    git clone https://github.com/Areef-uddin/ecommerce-backened.git /var/www/ecommerce/backend
+fi
+
+# Admin Panel
+if [ -d "/var/www/ecommerce/admin_panel/.git" ]; then
+    echo "🔄 Pulling latest Admin Panel changes..."
+    cd /var/www/ecommerce/admin_panel && git pull origin main
+else
+    echo "📥 Cloning Admin Panel Repository..."
+    rm -rf /var/www/ecommerce/admin_panel
+    git clone https://github.com/Areef-uddin/ecommerce-admin.git /var/www/ecommerce/admin_panel
+fi
+
+# Customer App
+if [ -d "/var/www/ecommerce/customer_app/.git" ]; then
+    echo "🔄 Pulling latest Customer App changes..."
+    cd /var/www/ecommerce/customer_app && git pull origin main
+else
+    echo "📥 Cloning Customer App Repository..."
+    rm -rf /var/www/ecommerce/customer_app
+    git clone https://github.com/Areef-uddin/ecommerce-customerapp.git /var/www/ecommerce/customer_app
+fi
+
+# 4. Create directories & extract pre-built Flutter Web
+echo "📁 Setting up media, static, and web directories..."
 mkdir -p /var/www/ecommerce/backend/media/tryon_inputs
 mkdir -p /var/www/ecommerce/backend/media/tryon_results
 mkdir -p /var/www/ecommerce/backend/staticfiles
 mkdir -p /var/www/ecommerce/customer_app/build/web
-mkdir -p /var/www/ecommerce/admin_panel
 
-# 4. Clone / Pull Repositories
-cd /var/www/ecommerce
-
-if [ ! -d "/var/www/ecommerce/backend/.git" ]; then
-    echo "📥 Cloning Backend Repository..."
-    git clone https://github.com/Areef-uddin/ecommerce-backened.git /var/www/ecommerce/backend
-else
-    echo "🔄 Pulling latest Backend changes..."
-    cd /var/www/ecommerce/backend && git pull origin main
-fi
-
-if [ ! -d "/var/www/ecommerce/admin_panel/.git" ]; then
-    echo "📥 Cloning Admin Panel Repository..."
-    git clone https://github.com/Areef-uddin/ecommerce-admin.git /var/www/ecommerce/admin_panel
-else
-    echo "🔄 Pulling latest Admin Panel changes..."
-    cd /var/www/ecommerce/admin_panel && git pull origin main
-fi
-
-if [ ! -d "/var/www/ecommerce/customer_app/.git" ]; then
-    echo "📥 Cloning Customer App Repository..."
-    git clone https://github.com/Areef-uddin/ecommerce-customerapp.git /var/www/ecommerce/customer_app
-else
-    echo "🔄 Pulling latest Customer App changes..."
-    cd /var/www/ecommerce/customer_app && git pull origin main
+if [ -f "/var/www/ecommerce/backend/deploy/customer_web.tar.gz" ]; then
+    echo "📦 Unpacking optimized Flutter Web release build..."
+    tar -xzf /var/www/ecommerce/backend/deploy/customer_web.tar.gz -C /var/www/ecommerce/customer_app/build/web/
 fi
 
 # 5. Setup Backend Python Virtual Environment
