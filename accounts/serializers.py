@@ -3,11 +3,20 @@ from .models import User, Address
 
 class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.ReadOnlyField()
+    referral_code = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'phone', 'first_name', 'last_name', 'full_name', 'avatar', 'is_staff', 'date_joined')
+        fields = ('id', 'email', 'phone', 'first_name', 'last_name', 'full_name', 'avatar', 'is_staff', 'date_joined', 'referral_code')
         read_only_fields = ('id', 'is_staff', 'date_joined')
+
+    def get_referral_code(self, obj):
+        try:
+            from referrals.models import ReferralCode
+            ref = ReferralCode.get_or_create_for_user(obj)
+            return ref.code
+        except Exception:
+            return ""
 
 
 class RegisterSerializer(serializers.ModelSerializer):
