@@ -43,7 +43,7 @@ class ReferralCode(models.Model):
         return ref_obj
 
     def get_referral_link(self, frontend_url=None):
-        base = frontend_url or getattr(settings, 'REFERRAL_FRONTEND_URL', getattr(settings, 'REFERRAL_BASE_URL', 'https://ecommerce-customerapp.vercel.app'))
+        base = frontend_url or getattr(settings, 'REFERRAL_FRONTEND_URL', getattr(settings, 'FRONTEND_URL', 'http://157.15.203.209'))
         base = base.rstrip('/')
         return f"{base}/#/register?ref={self.code}"
 
