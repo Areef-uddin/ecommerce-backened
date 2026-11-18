@@ -45,7 +45,7 @@ class ReferralCode(models.Model):
     def get_referral_link(self, frontend_url=None):
         base = frontend_url or getattr(settings, 'REFERRAL_FRONTEND_URL', getattr(settings, 'FRONTEND_URL', 'http://157.15.203.209'))
         base = base.rstrip('/')
-        return f"{base}/#/register?ref={self.code}"
+        return f"{base}/register?ref={self.code}"
 
 
 class Referral(models.Model):
