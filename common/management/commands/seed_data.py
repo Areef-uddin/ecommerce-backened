@@ -7,7 +7,16 @@ from products.models import (
     ProductColor, ProductSize, SizeGuide, Wishlist
 )
 from orders.models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest
-from common.models import Banner, Notification, FAQ
+from common.models import (
+    Banner,
+    Notification,
+    FAQ,
+    StoreSetting,
+    FooterSection,
+    FooterLink,
+    PolicyPage,
+    NewsletterSubscriber,
+)
 
 class Command(BaseCommand):
     help = 'Populate database with rich fashion e-commerce data matching StyleHub screens'
@@ -32,7 +41,7 @@ class Command(BaseCommand):
             admin_user.save()
 
         # 2. Customer User
-        customer = User.objects.filter(email='areef@example.com').first()
+        customer = User.objects.filter(email='areef@example.com').first() or User.objects.filter(phone='+919876543210').first()
         if not customer:
             customer = User.objects.create_user(
                 email='areef@example.com',
@@ -45,7 +54,6 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS('Customer created: areef@example.com / password123'))
         else:
             customer.set_password('password123')
-            customer.phone = '+919876543210'
             customer.first_name = 'Areefuddin'
             customer.save()
 
@@ -516,4 +524,172 @@ class Command(BaseCommand):
         # created only through the customer's Add to Cart action.
         CartItem.objects.filter(user=customer).delete()
 
-        self.stdout.write(self.style.SUCCESS('StyleHub Database seeded with 100% dynamic fashion data!'))
+        # 10. Store Settings & Footer Seeding
+        setting, _ = StoreSetting.objects.get_or_create(id=1)
+        setting.store_name = 'StyleHub Luxe'
+        setting.tagline = 'Curated Luxury Fashion & Timeless Designer Collections'
+        setting.description = 'StyleHub Luxe is India\'s premier destination for luxury fashion, ethnic designer couture, haute streetwear, and verified authentic lifestyle accessories.'
+        setting.support_phone = '+91 80 4567 8900'
+        setting.support_email = 'concierge@stylehub.com'
+        setting.flagship_address = '100 Feet Rd, Indiranagar, Bengaluru, Karnataka 560038'
+        setting.working_hours = 'Mon - Sat: 09:00 AM - 08:00 PM'
+        setting.whatsapp_number = '+919876543210'
+        setting.instagram_url = 'https://instagram.com/stylehub'
+        setting.facebook_url = 'https://facebook.com/stylehub'
+        setting.twitter_url = 'https://twitter.com/stylehub'
+        setting.youtube_url = 'https://youtube.com/stylehub'
+        setting.copyright_text = '© 2026 StyleHub Luxe Technologies Pvt Ltd. All rights reserved.'
+        setting.save()
+
+        # 11. Footer Sections & Links
+        footer_sections_data = [
+            {
+                'title': 'Shop',
+                'display_order': 1,
+                'links': [
+                    ("Women's Collection", '/products?category=women', False),
+                    ("Men's Collection", '/products?category=men', False),
+                    ('Kids Fashion', '/products?category=kids', False),
+                    ('Luxury & Couture', '/products?category=luxury', False),
+                    ('Footwear & Bags', '/products?category=footwear', False),
+                    ('New Arrivals', '/products?tag=new', False),
+                ]
+            },
+            {
+                'title': 'Customer Care',
+                'display_order': 2,
+                'links': [
+                    ('Track My Order', '/my-orders', False),
+                    ('Returns & Exchanges', '/return-refund', False),
+                    ('Shipping & Delivery', '/policies/shipping-policy', False),
+                    ('Help & FAQs', '/help-support', False),
+                    ('Refer & Earn VIP', '/referral-history', False),
+                ]
+            },
+            {
+                'title': 'StyleHub Company',
+                'display_order': 3,
+                'links': [
+                    ('About StyleHub', '/policies/about-us', False),
+                    ('VIP Lounge & Privilege', '/profile', False),
+                    ('Flagship Boutique', '/policies/store-locator', False),
+                    ('Careers', '/policies/careers', False),
+                    ('Contact Concierge', '/help-support', False),
+                ]
+            },
+            {
+                'title': 'Policies & Legal',
+                'display_order': 4,
+                'links': [
+                    ('Privacy Policy', '/policies/privacy-policy', False),
+                    ('Terms of Service', '/policies/terms-conditions', False),
+                    ('Return & Refund Policy', '/policies/refund-policy', False),
+                    ('Authenticity & Security', '/policies/security', False),
+                ]
+            },
+        ]
+
+        for s_data in footer_sections_data:
+            section, _ = FooterSection.objects.get_or_create(
+                title=s_data['title'],
+                defaults={'display_order': s_data['display_order'], 'is_active': True}
+            )
+            section.display_order = s_data['display_order']
+            section.save()
+            for idx, (label, url, is_ext) in enumerate(s_data['links']):
+                FooterLink.objects.update_or_create(
+                    section=section,
+                    label=label,
+                    defaults={'url': url, 'is_external': is_ext, 'display_order': idx}
+                )
+
+        # 12. Policy Pages Content
+        policy_pages_data = [
+            {
+                'slug': 'about-us',
+                'title': 'About StyleHub Luxe',
+                'content': '''# About StyleHub Luxe
+
+Founded with a passion for couture craftsmanship and modern elegance, StyleHub Luxe brings high-fashion sensibilities and curated designer collections directly to your doorstep.
+
+## Our Philosophy
+We curate authentic fashion from established designer labels and visionary independent ateliers worldwide. Every garment is inspected for fabric authenticity, stitch precision, and timeless appeal.
+
+## Flagship Experience
+Visit our flagship styling salon in Indiranagar, Bengaluru for personal styling sessions, bespoke fittings, and complimentary champagne tastings.
+
+- **Address:** 100 Feet Rd, Indiranagar, Bengaluru, Karnataka 560038
+- **Concierge:** concierge@stylehub.com | +91 80 4567 8900
+'''
+            },
+            {
+                'slug': 'privacy-policy',
+                'title': 'Privacy Policy',
+                'content': '''# StyleHub Luxe Privacy Policy
+
+Last updated: November 2026
+
+Your privacy and security are paramount. This policy outlines how StyleHub Luxe collects, stores, and protects your personal data.
+
+### 1. Data Collection
+We collect personal information necessary to fulfill your orders, including name, shipping address, contact number, and email. Payment details are processed through PCI-DSS certified gateway Razorpay and are never stored on our servers.
+
+### 2. Virtual Try-On Photos
+Images uploaded for AI Virtual Try-On are processed securely in memory and discarded after composite generation. We do not sell or train external models on customer portrait photos.
+
+### 3. Contact Us
+For any privacy inquiries or data deletion requests, email our Data Privacy Officer at concierge@stylehub.com.
+'''
+            },
+            {
+                'slug': 'terms-conditions',
+                'title': 'Terms & Conditions',
+                'content': '''# Terms of Service
+
+Welcome to StyleHub Luxe. By browsing, creating an account, or placing an order on our platform, you agree to these Terms of Service.
+
+### Orders and Authenticity
+All products sold on StyleHub Luxe are 100% authentic, brand-new, and sourced directly from verified fashion houses. We reserve the right to cancel orders with unexpected pricing or inventory discrepancies.
+
+### Pricing and Taxes
+All prices are displayed in Indian Rupees (INR) inclusive of all applicable Goods and Services Taxes (GST).
+'''
+            },
+            {
+                'slug': 'refund-policy',
+                'title': 'Return & Refund Policy',
+                'content': '''# Return & Refund Policy
+
+We want you to love everything you receive from StyleHub Luxe. If something isn't right, we offer an effortless return process.
+
+### 7-Day Window
+You may initiate a return within 7 calendar days of delivery for unworn items in their original packaging with tags attached.
+
+### Doorstep Pickup & Fast Refund
+Our courier partner will pick up the package from your doorstep. Once received and verified, refunds are credited back to your original payment method or StyleHub Wallet within 48 to 72 business hours.
+'''
+            },
+            {
+                'slug': 'shipping-policy',
+                'title': 'Shipping & Delivery Policy',
+                'content': '''# Shipping & Delivery Policy
+
+### Complimentary Express Shipping
+StyleHub Luxe provides complimentary insured express shipping across India on all orders.
+
+### Delivery Timelines
+- **Metro Cities (Bengaluru, Mumbai, Delhi, Hyderabad):** 2 to 3 business days.
+- **Rest of India:** 3 to 5 business days.
+
+Live tracking updates are provided via SMS, WhatsApp, and in the 'My Orders' section of the application.
+'''
+            },
+        ]
+
+        for p_data in policy_pages_data:
+            PolicyPage.objects.update_or_create(
+                slug=p_data['slug'],
+                defaults={'title': p_data['title'], 'content': p_data['content']}
+            )
+
+        self.stdout.write(self.style.SUCCESS('StyleHub Database seeded with 100% dynamic fashion data & footer APIs!'))

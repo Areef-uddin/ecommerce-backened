@@ -2,8 +2,29 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from django.db.models import Sum, Count
-from .models import Banner, Notification, FAQ, ContactTicket
-from .serializers import BannerSerializer, NotificationSerializer, FAQSerializer, ContactTicketSerializer
+from .models import (
+    Banner,
+    Notification,
+    FAQ,
+    ContactTicket,
+    StoreSetting,
+    FooterSection,
+    FooterLink,
+    PolicyPage,
+    NewsletterSubscriber,
+)
+from .serializers import (
+    BannerSerializer,
+    NotificationSerializer,
+    FAQSerializer,
+    ContactTicketSerializer,
+    StoreSettingSerializer,
+    FooterSectionSerializer,
+    FooterLinkSerializer,
+    PolicyPageListSerializer,
+    PolicyPageDetailSerializer,
+    NewsletterSubscriberSerializer,
+)
 from orders.models import Order
 from products.models import Product
 from accounts.models import User
@@ -78,6 +99,116 @@ class ContactTicketViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return [permissions.AllowAny()]
         return [permissions.IsAdminUser()]
+
+
+class StoreSettingViewSet(viewsets.ModelViewSet):
+    queryset = StoreSetting.objects.all()
+    serializer_class = StoreSettingSerializer
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [permissions.IsAdminUser()]
+        return [permissions.AllowAny()]
+
+    def list(self, request, *args, **kwargs):
+        settings_obj = StoreSetting.get_settings()
+        serializer = self.get_serializer(settings_obj)
+        return Response(serializer.data)
+
+
+class FooterSectionViewSet(viewsets.ModelViewSet):
+    queryset = FooterSection.objects.filter(is_active=True).prefetch_related('links')
+    serializer_class = FooterSectionSerializer
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [permissions.IsAdminUser()]
+        return [permissions.AllowAny()]
+
+    def get_queryset(self):
+        if self.request.user and self.request.user.is_staff:
+            return FooterSection.objects.all().prefetch_related('links')
+        return FooterSection.objects.filter(is_active=True).prefetch_related('links')
+
+
+class PolicyPageViewSet(viewsets.ModelViewSet):
+    queryset = PolicyPage.objects.all()
+    lookup_field = 'slug'
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return PolicyPageDetailSerializer
+        return PolicyPageListSerializer
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [permissions.IsAdminUser()]
+        return [permissions.AllowAny()]
+
+
+class NewsletterSubscriberViewSet(viewsets.ModelViewSet):
+    queryset = NewsletterSubscriber.objects.all().order_by('-subscribed_at')
+    serializer_class = NewsletterSubscriberSerializer
+
+    def get_permissions(self):
+        if self.action == 'create':
+            return [permissions.AllowAny()]
+        return [permissions.IsAdminUser()]
+
+    def create(self, request, *args, **kwargs):
+        email = request.data.get('email', '').strip().lower()
+        if not email or '@' not in email:
+            return Response({'detail': 'Please provide a valid email address.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        subscriber, created = NewsletterSubscriber.objects.get_or_create(
+            email=email,
+            defaults={'is_active': True}
+        )
+        if not created and not subscriber.is_active:
+            subscriber.is_active = True
+            subscriber.save()
+
+        return Response({
+            'success': True,
+            'message': 'Thank you for subscribing to StyleHub Luxe updates & private sales!',
+            'email': email
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def footer_data_view(request):
+    """
+    Returns complete aggregate footer payload in 1 call:
+    - store_settings (phone, email, address, hours, socials, copyright)
+    - sections (shop, customer care, company, legal, each with links)
+    - policies (list of policy pages)
+    - payment_methods & trust_badges
+    """
+    store_obj = StoreSetting.get_settings()
+    sections = FooterSection.objects.filter(is_active=True).prefetch_related('links').order_by('display_order')
+    policies = PolicyPage.objects.all().order_by('title')
+
+    payload = {
+        'store_settings': StoreSettingSerializer(store_obj).data,
+        'sections': FooterSectionSerializer(sections, many=True).data,
+        'policies': PolicyPageListSerializer(policies, many=True).data,
+        'payment_methods': [
+            'Visa',
+            'Mastercard',
+            'UPI / GPay / PhonePe',
+            'Razorpay',
+            'Cash on Delivery',
+        ],
+        'trust_badges': [
+            {'icon': 'shield', 'title': '100% Authentic Luxury', 'desc': 'Directly from verified houses'},
+            {'icon': 'truck', 'title': 'Express Shipping', 'desc': 'Free insured shipping across India'},
+            {'icon': 'refresh', 'title': '7-Day Easy Returns', 'desc': 'Hassle-free doorstep pickup'},
+            {'icon': 'lock', 'title': 'Secure Payments', 'desc': '256-bit encrypted transactions'},
+        ]
+    }
+    return Response(payload)
+
 
 
 @api_view(['GET'])

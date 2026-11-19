@@ -1,5 +1,15 @@
 from rest_framework import serializers
-from .models import Banner, Notification, FAQ, ContactTicket
+from .models import (
+    Banner,
+    Notification,
+    FAQ,
+    ContactTicket,
+    StoreSetting,
+    FooterSection,
+    FooterLink,
+    PolicyPage,
+    NewsletterSubscriber,
+)
 
 class BannerSerializer(serializers.ModelSerializer):
     class Meta:
@@ -34,3 +44,47 @@ class ContactTicketSerializer(serializers.ModelSerializer):
         model = ContactTicket
         fields = '__all__'
         read_only_fields = ('id', 'created_at')
+
+
+class StoreSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StoreSetting
+        fields = '__all__'
+
+
+class FooterLinkSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FooterLink
+        fields = ('id', 'label', 'url', 'is_external', 'display_order')
+
+
+class FooterSectionSerializer(serializers.ModelSerializer):
+    links = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FooterSection
+        fields = ('id', 'title', 'display_order', 'is_active', 'links')
+
+    def get_links(self, obj):
+        links = obj.links.all().order_by('display_order')
+        return FooterLinkSerializer(links, many=True).data
+
+
+class PolicyPageListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PolicyPage
+        fields = ('id', 'slug', 'title', 'updated_at')
+
+
+class PolicyPageDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PolicyPage
+        fields = ('id', 'slug', 'title', 'content', 'updated_at')
+
+
+class NewsletterSubscriberSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NewsletterSubscriber
+        fields = ('id', 'email', 'subscribed_at', 'is_active')
+        read_only_fields = ('id', 'subscribed_at', 'is_active')
+
