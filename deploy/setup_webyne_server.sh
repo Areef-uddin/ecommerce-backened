@@ -110,6 +110,7 @@ chmod 600 /var/www/ecommerce/backend/.env
 # 6. Run Migrations & Collect Static Files
 echo "🗄️ Running database migrations & collecting static files..."
 /var/www/ecommerce/backend/venv/bin/python manage.py migrate --noinput
+/var/www/ecommerce/backend/venv/bin/python manage.py seed_data
 /var/www/ecommerce/backend/venv/bin/python manage.py collectstatic --noinput
 
 # 7. Build React Admin Panel
