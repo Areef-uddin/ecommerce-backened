@@ -2,6 +2,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from django.db.models import Sum, Count
+from django.core.cache import cache
 from .models import (
     Banner,
     Notification,
@@ -42,6 +43,16 @@ class BannerViewSet(viewsets.ModelViewSet):
         if self.request.user and self.request.user.is_staff:
             return Banner.objects.all().order_by('display_order')
         return Banner.objects.filter(is_active=True).order_by('display_order')
+
+    def list(self, request, *args, **kwargs):
+        if not (request.user and request.user.is_staff):
+            cached = cache.get('active_banners_list')
+            if cached is not None:
+                return Response(cached)
+            resp = super().list(request, *args, **kwargs)
+            cache.set('active_banners_list', resp.data, 600)
+            return resp
+        return super().list(request, *args, **kwargs)
 
 
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -179,12 +190,16 @@ class NewsletterSubscriberViewSet(viewsets.ModelViewSet):
 @permission_classes([permissions.AllowAny])
 def footer_data_view(request):
     """
-    Returns complete aggregate footer payload in 1 call:
+    Returns complete aggregate footer payload in 1 call (cached for 10 minutes):
     - store_settings (phone, email, address, hours, socials, copyright)
     - sections (shop, customer care, company, legal, each with links)
     - policies (list of policy pages)
     - payment_methods & trust_badges
     """
+    cached = cache.get('footer_aggregate_payload')
+    if cached is not None:
+        return Response(cached)
+
     store_obj = StoreSetting.get_settings()
     sections = FooterSection.objects.filter(is_active=True).prefetch_related('links').order_by('display_order')
     policies = PolicyPage.objects.all().order_by('title')
@@ -207,6 +222,7 @@ def footer_data_view(request):
             {'icon': 'lock', 'title': 'Secure Payments', 'desc': '256-bit encrypted transactions'},
         ]
     }
+    cache.set('footer_aggregate_payload', payload, 600)
     return Response(payload)
 
 

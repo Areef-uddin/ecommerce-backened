@@ -19,15 +19,19 @@ class CartViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return CartItem.objects.filter(user=self.request.user).select_related('product')
+        return CartItem.objects.filter(user=self.request.user)\
+            .select_related('product', 'product__category', 'product__subcategory')\
+            .prefetch_related('product__images')
 
     def create(self, request, *args, **kwargs):
         product_id = request.data.get('product_id')
         quantity = int(request.data.get('quantity', 1))
         size = request.data.get('size', 'M')
-        color = request.data.get('color', 'Pink')
+        color = request.data.get('color', 'Standard')
 
-        product = Product.objects.filter(id=product_id).first()
+        product = Product.objects.filter(id=product_id)\
+            .select_related('category', 'subcategory')\
+            .prefetch_related('images').first()
         if not product:
             return Response({'detail': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -40,10 +44,76 @@ class CartViewSet(viewsets.ModelViewSet):
         )
         if not created:
             cart_item.quantity += quantity
-            cart_item.save()
+            cart_item.save(update_fields=['quantity'])
+
+        # Preload and return complete cart items and summary in 1 response (avoids multiple network calls)
+        items = list(self.get_queryset())
+        item_total = sum(item.product.price * item.quantity for item in items)
+        discount_amount = Decimal('300.00') if item_total > Decimal('2000.00') else Decimal('0.00')
+        final_total = max(Decimal('0.00'), item_total - discount_amount)
 
         serializer = self.get_serializer(cart_item)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        items_serializer = self.get_serializer(items, many=True)
+        return Response({
+            'item': serializer.data,
+            'cart_items': items_serializer.data,
+            'count': len(items),
+            'summary': {
+                'count': len(items),
+                'item_total': str(item_total),
+                'discount_amount': str(discount_amount),
+                'delivery_charges': 'FREE',
+                'final_total': str(final_total),
+                'coupon_applied': False
+            }
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'])
+    @transaction.atomic
+    def buy_now(self, request):
+        """
+        Instant Buy Now: atomic setup of cart with the selected product,
+        returning items + calculated totals in 1 single network call.
+        """
+        product_id = request.data.get('product_id')
+        quantity = int(request.data.get('quantity', 1))
+        size = request.data.get('size', 'M')
+        color = request.data.get('color', 'Standard')
+
+        product = Product.objects.filter(id=product_id)\
+            .select_related('category', 'subcategory')\
+            .prefetch_related('images').first()
+        if not product:
+            return Response({'detail': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Clear existing cart items for isolated Buy Now checkout
+        CartItem.objects.filter(user=request.user).delete()
+        cart_item = CartItem.objects.create(
+            user=request.user,
+            product=product,
+            size=size,
+            color=color,
+            quantity=quantity
+        )
+
+        item_total = product.price * quantity
+        discount_amount = Decimal('300.00') if item_total > Decimal('2000.00') else Decimal('0.00')
+        final_total = max(Decimal('0.00'), item_total - discount_amount)
+
+        serializer = self.get_serializer(cart_item)
+        return Response({
+            'item': serializer.data,
+            'cart_items': [serializer.data],
+            'count': 1,
+            'summary': {
+                'count': 1,
+                'item_total': str(item_total),
+                'discount_amount': str(discount_amount),
+                'delivery_charges': 'FREE',
+                'final_total': str(final_total),
+                'coupon_applied': False
+            }
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
@@ -553,21 +623,70 @@ class OrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         """
-        Allows user to cancel an existing pending/placed order.
+        Allows user to cancel an existing pending/placed order and initiates refund if paid online.
         """
         order = self.get_object()
         if not request.user.is_staff and order.user != request.user:
             return Response({'detail': 'Not allowed.'}, status=status.HTTP_403_FORBIDDEN)
         if order.order_status in ['Delivered', 'Cancelled']:
             return Response({'detail': f'Cannot cancel an order with status {order.order_status}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        was_paid = (order.payment_status == 'Paid')
         order.order_status = 'Cancelled'
-        order.payment_status = 'Cancelled'
+
+        if was_paid:
+            order.payment_status = 'Refund Pending'
+            # Attempt Razorpay refund if live reference available
+            if order.payment_method == 'Razorpay' and order.payment_reference and getattr(settings, 'RAZORPAY_KEY_ID', None) and getattr(settings, 'RAZORPAY_KEY_SECRET', None):
+                try:
+                    client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+                    refund = client.payment.refund(order.payment_reference, {
+                        'amount': int(order.total_amount * 100),
+                        'notes': {'order_id': str(order.id), 'reason': 'Customer Order Cancellation'},
+                    })
+                    if refund.get('status') == 'processed':
+                        order.payment_status = 'Refund Processed'
+                except Exception as rz_err:
+                    print(f"[Razorpay Cancellation Refund Notice]: {rz_err}")
+        else:
+            order.payment_status = 'Cancelled'
+
         order.save()
+
+        # Add OrderTimeline event
+        try:
+            OrderTimeline.objects.create(
+                order=order,
+                status_step='Cancelled',
+                date_text=timezone.now().strftime('%d %b, %I:%M %p'),
+                is_completed=True,
+                order_index=99
+            )
+        except Exception:
+            pass
+
+        # Send Notification to customer
+        try:
+            from common.models import Notification
+            notify_msg = f'Order #{order.order_number} has been cancelled.'
+            if was_paid:
+                notify_msg += f' Refund of ₹{order.total_amount:.2f} has been initiated to your {order.payment_method}.'
+            Notification.objects.create(
+                user=order.user,
+                title='Order Cancelled',
+                message=notify_msg,
+                category='orders',
+                icon='x-circle'
+            )
+        except Exception:
+            pass
+
         try:
             from referrals.services import ReferralService
             ReferralService.handle_order_cancellation(order)
         except Exception as ref_err:
             print(f"[Referral Cancellation Revert Error]: {ref_err}")
+
         return Response(self.get_serializer(order).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'])

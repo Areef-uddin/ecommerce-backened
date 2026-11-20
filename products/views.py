@@ -9,8 +9,10 @@ from .serializers import (
     SizeGuideSerializer, WishlistSerializer
 )
 
+from django.core.cache import cache
+
 class CategoryViewSet(viewsets.ModelViewSet):
-    queryset = Category.objects.filter(is_active=True).order_by('display_order', 'name')
+    queryset = Category.objects.filter(is_active=True).prefetch_related('subcategories').order_by('display_order', 'name')
     serializer_class = CategorySerializer
 
     def get_permissions(self):
@@ -19,8 +21,19 @@ class CategoryViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # Admin can view all categories including inactive
         if self.request.user and self.request.user.is_staff:
-            return Category.objects.all().order_by('display_order', 'name')
-        return Category.objects.filter(is_active=True).order_by('display_order', 'name')
+            return Category.objects.all().prefetch_related('subcategories').order_by('display_order', 'name')
+        return Category.objects.filter(is_active=True).prefetch_related('subcategories').order_by('display_order', 'name')
+
+    def list(self, request, *args, **kwargs):
+        # High-performance caching for public category tree (10 minutes)
+        if not (request.user and request.user.is_staff):
+            cached_data = cache.get('active_category_tree')
+            if cached_data is not None:
+                return Response(cached_data)
+            response = super().list(request, *args, **kwargs)
+            cache.set('active_category_tree', response.data, 600)
+            return response
+        return super().list(request, *args, **kwargs)
 
 
 class SubCategoryViewSet(viewsets.ModelViewSet):

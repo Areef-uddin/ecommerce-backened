@@ -156,7 +156,9 @@ class ProductListSerializer(serializers.ModelSerializer):
         )
 
     def get_primary_image(self, obj):
-        img = obj.images.filter(is_primary=True).first() or obj.images.first()
+        # Performance: use prefetched images in memory to avoid N+1 SQL queries
+        all_images = list(obj.images.all())
+        img = next((i for i in all_images if getattr(i, 'is_primary', False)), None) or (all_images[0] if all_images else None)
         if not img or not img.image_url:
             return None
         url = img.image_url
@@ -164,14 +166,19 @@ class ProductListSerializer(serializers.ModelSerializer):
             request = self.context.get('request')
             if request:
                 return request.build_absolute_uri('/' + url.lstrip('/'))
-            return f"https://ecommerce-backened-jsiy.onrender.com/{url.lstrip('/')}"
+            return f"/{url.lstrip('/')}"
         return url
 
     def get_is_wishlisted(self, obj):
+        # Performance: cache user's wishlist IDs on request object to avoid N+1 SQL queries
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return Wishlist.objects.filter(user=request.user, product=obj).exists()
-        return False
+        if not request or not request.user.is_authenticated:
+            return False
+        cached_ids = getattr(request, '_cached_wishlist_product_ids', None)
+        if cached_ids is None:
+            cached_ids = set(Wishlist.objects.filter(user=request.user).values_list('product_id', flat=True))
+            request._cached_wishlist_product_ids = cached_ids
+        return obj.id in cached_ids
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):
@@ -193,9 +200,13 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     def get_is_wishlisted(self, obj):
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return Wishlist.objects.filter(user=request.user, product=obj).exists()
-        return False
+        if not request or not request.user.is_authenticated:
+            return False
+        cached_ids = getattr(request, '_cached_wishlist_product_ids', None)
+        if cached_ids is None:
+            cached_ids = set(Wishlist.objects.filter(user=request.user).values_list('product_id', flat=True))
+            request._cached_wishlist_product_ids = cached_ids
+        return obj.id in cached_ids
 
 
 class ProductCreateUpdateSerializer(serializers.ModelSerializer):

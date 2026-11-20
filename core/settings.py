@@ -86,7 +86,7 @@ DATABASE_URL = os.environ.get(
 )
 
 DATABASES = {
-    'default': dj_database_url.parse(DATABASE_URL)
+    'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)
 }
 
 if 'test' in sys.argv:
@@ -94,6 +94,15 @@ if 'test' in sys.argv:
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': ':memory:',
     }
+
+# High-Performance In-Memory Cache (reduces database queries for categories, banners, footer, settings)
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'stylehub-cache',
+        'TIMEOUT': 300,
+    }
+}
 
 # Razorpay Configuration (Secure credentials loaded via environment)
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
