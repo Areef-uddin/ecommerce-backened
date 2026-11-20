@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db import transaction
 import razorpay
 from common.models import Notification
-from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ReturnTimeline, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG
+from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ReturnTimeline, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG, compute_estimated_delivery
 from .serializers import CartItemSerializer, OrderSerializer, ReturnRequestSerializer, ShipmentTrackingSerializer
 from .courier import get_courier_provider
 from products.models import Product
@@ -284,7 +284,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             discount_amount=discount_amount,
             delivery_charges=delivery_charges,
             total_amount=total_amount,
-            estimated_delivery='31 Oct - 03 Nov'
+            estimated_delivery=compute_estimated_delivery()
         )
 
         # Create Order Items
@@ -508,7 +508,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             discount_amount=discount_amount,
             delivery_charges=delivery_charges,
             total_amount=total_amount,
-            estimated_delivery='31 Oct - 03 Nov'
+            estimated_delivery=compute_estimated_delivery()
         )
 
         for ci in cart_items:
