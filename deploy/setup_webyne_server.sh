@@ -53,6 +53,9 @@ PHP_SERVICE=$(systemctl list-unit-files | grep -oE "php[0-9.]+-fpm" | head -n 1 
 systemctl enable "$PHP_SERVICE" || true
 systemctl restart "$PHP_SERVICE" || true
 
+# Ensure localhost is resolvable in /etc/hosts
+grep -q "127.0.0.1.*localhost" /etc/hosts || echo "127.0.0.1 localhost" >> /etc/hosts
+
 # 1.3 Setup FileBrowser (Web File Manager to view/upload/edit all server files)
 echo "📂 Setting up FileBrowser (Web File Manager)..."
 if ! command -v filebrowser &> /dev/null; then
@@ -62,9 +65,10 @@ fi
 mkdir -p /etc/filebrowser
 if [ ! -f "/etc/filebrowser/filebrowser.db" ]; then
     filebrowser config init -d /etc/filebrowser/filebrowser.db
-    filebrowser config set -d /etc/filebrowser/filebrowser.db --root /var/www/ecommerce --port 8085 --address 0.0.0.0
-    filebrowser users add admin StyleHubFiles2026! --perm.admin -d /etc/filebrowser/filebrowser.db
 fi
+filebrowser config set -d /etc/filebrowser/filebrowser.db --root /var/www/ecommerce --port 8085 --address 0.0.0.0
+filebrowser users update admin -p "StyleHubFiles2026!" -d /etc/filebrowser/filebrowser.db 2>/dev/null || \
+filebrowser users add admin "StyleHubFiles2026!" --perm.admin -d /etc/filebrowser/filebrowser.db 2>/dev/null || true
 
 cat << 'EOF' > /etc/systemd/system/filebrowser.service
 [Unit]
