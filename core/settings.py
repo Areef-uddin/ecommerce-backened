@@ -79,12 +79,12 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'core.wsgi.application'
 
-# Database configuration: Native Production MySQL (Local VPS Instance)
+# Database configuration: Native Production PostgreSQL (Local VPS Instance)
 DB_NAME = os.environ.get('DB_NAME', 'ecommerce_db')
 DB_USER = os.environ.get('DB_USER', 'ecommerce_user')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', 'StyleHub_MySQL_2026!#$')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', 'StyleHub_Postgres_2026!#$')
 DB_HOST = os.environ.get('DB_HOST', '127.0.0.1')
-DB_PORT = os.environ.get('DB_PORT', '3306')
+DB_PORT = os.environ.get('DB_PORT', '5432')
 
 if 'test' in sys.argv:
     DATABASES = {
@@ -103,16 +103,12 @@ elif os.environ.get('USE_SQLITE', 'False').lower() in ('true', '1', 't'):
 else:
     DATABASES = {
         'default': {
-            'ENGINE': 'django.db.backends.mysql',
+            'ENGINE': 'django.db.backends.postgresql',
             'NAME': DB_NAME,
             'USER': DB_USER,
             'PASSWORD': DB_PASSWORD,
             'HOST': DB_HOST,
             'PORT': DB_PORT,
-            'OPTIONS': {
-                'charset': 'utf8mb4',
-                'init_command': "SET sql_mode='STRICT_TRANS_TABLES',default_storage_engine=INNODB",
-            },
             'CONN_MAX_AGE': 600,
         }
     }

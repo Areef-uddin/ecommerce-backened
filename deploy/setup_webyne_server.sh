@@ -12,6 +12,14 @@ echo "=========================================================="
 
 # 1. Update system packages
 echo "📦 Updating system packages..."
+
+# Remove MySQL server completely
+echo "🧹 Removing MySQL server completely..."
+systemctl stop mysql 2>/dev/null || true
+systemctl disable mysql 2>/dev/null || true
+apt-get remove --purge -y mysql-server mysql-client mysql-common 2>/dev/null || true
+apt-get autoremove -y 2>/dev/null || true
+
 apt-get update -y
 apt-get install -y \
     curl \
@@ -21,31 +29,98 @@ apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
-    mysql-server \
-    default-libmysqlclient-dev \
+    postgresql \
+    postgresql-contrib \
+    libpq-dev \
     pkg-config \
     php-fpm \
-    php-mysql \
+    php-pgsql \
     build-essential \
     unzip \
     tar
 
-# 1.1 Setup and Configure Local MySQL Server
-echo "🗄️ Setting up and securing local MySQL Server on VPS..."
-systemctl enable mysql
-systemctl start mysql
+# 1.1 Setup and Configure Local PostgreSQL Server
+echo "🐘 Setting up and securing local PostgreSQL Server on VPS..."
+systemctl enable postgresql
+systemctl start postgresql
 
-mysql -e "CREATE DATABASE IF NOT EXISTS ecommerce_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -e "CREATE USER IF NOT EXISTS 'ecommerce_user'@'localhost' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
-mysql -e "ALTER USER 'ecommerce_user'@'localhost' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
-mysql -e "GRANT ALL PRIVILEGES ON ecommerce_db.* TO 'ecommerce_user'@'localhost';"
-mysql -e "CREATE USER IF NOT EXISTS 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
-mysql -e "ALTER USER 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
-mysql -e "GRANT ALL PRIVILEGES ON ecommerce_db.* TO 'ecommerce_user'@'127.0.0.1';"
-mysql -e "FLUSH PRIVILEGES;"
+sudo -u postgres psql -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'ecommerce_user') THEN CREATE ROLE ecommerce_user WITH LOGIN PASSWORD 'StyleHub_Postgres_2026!#$'; END IF; END \$\$;"
+sudo -u postgres psql -c "ALTER ROLE ecommerce_user WITH LOGIN PASSWORD 'StyleHub_Postgres_2026!#$';"
+sudo -u postgres psql -c "SELECT 'CREATE DATABASE ecommerce_db OWNER ecommerce_user' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ecommerce_db')\gexec"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ecommerce_db TO ecommerce_user;"
+sudo -u postgres psql -d ecommerce_db -c "GRANT ALL ON SCHEMA public TO ecommerce_user;"
+sudo -u postgres psql -d ecommerce_db -c "ALTER SCHEMA public OWNER TO ecommerce_user;"
 
-# 1.2 Setup Adminer (Visual Web Database Manager for MySQL - like pgAdmin with 1-click Auto-Login)
-echo "🐘 Setting up Adminer (Web Database GUI for MySQL)..."
+# 1.2 Setup Official pgAdmin 4 Web GUI
+echo "🐘 Setting up official pgAdmin 4 Web GUI..."
+curl -fsS https://www.pgadmin.org/static/packages_pgadmin_org.pub | gpg --dearmor --yes -o /usr/share/keyrings/packages-pgadmin-org.gpg 2>/dev/null || true
+echo "deb [signed-by=/usr/share/keyrings/packages-pgadmin-org.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/jammy pgadmin4 main" > /etc/apt/sources.list.d/pgadmin4.list
+apt-get update -y
+apt-get install -y pgadmin4-web
+
+mkdir -p /var/lib/pgadmin /var/log/pgadmin /etc/pgadmin
+cat << 'EOF' > /usr/pgadmin4/web/config_local.py
+import os
+DATA_DIR = '/var/lib/pgadmin'
+LOG_FILE = '/var/log/pgadmin/pgadmin4.log'
+SQLITE_PATH = '/var/lib/pgadmin/pgadmin4.db'
+SESSION_DB_PATH = '/var/lib/pgadmin/sessions'
+STORAGE_DIR = '/var/lib/pgadmin/storage'
+SERVER_MODE = True
+DEFAULT_SERVER = '127.0.0.1'
+DEFAULT_SERVER_PORT = 5050
+MASTER_PASSWORD_REQUIRED = False
+EOF
+
+cat << 'EOF' > /etc/pgadmin/servers.json
+{
+  "Servers": {
+    "1": {
+      "Name": "StyleHub Local PostgreSQL",
+      "Group": "Servers",
+      "Host": "127.0.0.1",
+      "Port": 5432,
+      "MaintenanceDB": "ecommerce_db",
+      "Username": "ecommerce_user",
+      "SSLMode": "prefer"
+    }
+  }
+}
+EOF
+
+# Initialize pgAdmin 4 admin user non-interactively
+/usr/pgadmin4/venv/bin/python3 /usr/pgadmin4/web/setup.py --load-servers /etc/pgadmin/servers.json << 'EOF' 2>/dev/null || true
+admin@stylehub.com
+StyleHubPgAdmin2026!#$
+StyleHubPgAdmin2026!#$
+EOF
+
+chown -R www-data:www-data /var/lib/pgadmin /var/log/pgadmin 2>/dev/null || true
+
+cat << 'EOF' > /etc/systemd/system/pgadmin4.service
+[Unit]
+Description=pgAdmin 4 Web GUI Service
+After=network.target postgresql.service
+
+[Service]
+User=root
+WorkingDirectory=/usr/pgadmin4/web
+Environment="PGADMIN_DEFAULT_EMAIL=admin@stylehub.com"
+Environment="PGADMIN_DEFAULT_PASSWORD=StyleHubPgAdmin2026!#$"
+ExecStart=/usr/pgadmin4/venv/bin/gunicorn --bind 0.0.0.0:5050 --workers 1 --threads 4 pgAdmin4:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable pgadmin4
+systemctl restart pgadmin4
+
+# 1.3 Setup Adminer (Universal Web Database Manager - supports PostgreSQL with 1-click Auto-Login)
+echo "🐘 Setting up Adminer (Web Database GUI for PostgreSQL)..."
 mkdir -p /var/www/adminer
 curl -sSL https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php -o /var/www/adminer/adminer-core.php
 
@@ -54,10 +129,10 @@ cat << 'EOF' > /var/www/adminer/index.php
 function adminer_object() {
     class AdminerSoftware extends Adminer {
         function name() {
-            return 'StyleHub MySQL Console';
+            return 'StyleHub PostgreSQL Console';
         }
         function credentials() {
-            return array('localhost', 'ecommerce_user', 'StyleHub_MySQL_2026!#$');
+            return array('localhost', 'ecommerce_user', 'StyleHub_Postgres_2026!#$');
         }
         function database() {
             return 'ecommerce_db';
@@ -80,7 +155,7 @@ systemctl restart "$PHP_SERVICE" || true
 # Ensure localhost is resolvable in /etc/hosts
 grep -q "127.0.0.1.*localhost" /etc/hosts || echo "127.0.0.1 localhost" >> /etc/hosts
 
-# 1.3 Setup FileBrowser (Web File Manager to view/upload/edit all server files)
+# 1.4 Setup FileBrowser (Web File Manager to view/upload/edit all server files)
 echo "📂 Setting up FileBrowser (Web File Manager)..."
 systemctl stop filebrowser 2>/dev/null || true
 if ! command -v filebrowser &> /dev/null; then
@@ -177,19 +252,19 @@ fi
 
 /var/www/ecommerce/backend/venv/bin/pip install --upgrade pip
 /var/www/ecommerce/backend/venv/bin/pip install -r requirements.txt
-/var/www/ecommerce/backend/venv/bin/pip install gunicorn pillow pymysql mysqlclient
+/var/www/ecommerce/backend/venv/bin/pip install gunicorn pillow psycopg2-binary
 
-# Create or Update .env with verified production credentials (Local MySQL)
-echo "📝 Writing production .env for Backend (Local MySQL)..."
+# Create or Update .env with verified production credentials (Local PostgreSQL)
+echo "📝 Writing production .env for Backend (Local PostgreSQL)..."
 cat << 'EOF' > /var/www/ecommerce/backend/.env
 DEBUG=False
 SECRET_KEY=django-insecure-pro-ecom-webyne-vps-secure-key-2026!@#$%^
 ALLOWED_HOSTS=157.15.203.209,localhost,127.0.0.1
 DB_NAME=ecommerce_db
 DB_USER=ecommerce_user
-DB_PASSWORD=StyleHub_MySQL_2026!#$
+DB_PASSWORD=StyleHub_Postgres_2026!#$
 DB_HOST=127.0.0.1
-DB_PORT=3306
+DB_PORT=5432
 CORS_ALLOW_ALL=True
 FRONTEND_URL=http://157.15.203.209
 TRYON_PROVIDER=auto
@@ -300,7 +375,7 @@ server {
         add_header Cache-Control "public, max-age=604800";
     }
 
-    # Visual Database GUI (Adminer - MySQL Web GUI like pgAdmin)
+    # Visual Database GUI (Adminer - Universal Web GUI)
     location = /db-admin {
         return 301 /db-admin/;
     }
@@ -315,6 +390,17 @@ server {
             fastcgi_param SCRIPT_FILENAME $request_filename;
             fastcgi_pass unix:__PHP_SOCK__;
         }
+    }
+
+    # pgAdmin 4 Web GUI
+    location /pgadmin4/ {
+        proxy_pass http://127.0.0.1:5050/;
+        proxy_set_header X-Script-Name /pgadmin4;
+        proxy_set_header Host $host;
+        proxy_set_header X-Scheme $scheme;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_redirect off;
     }
 
     # FileBrowser Web File Manager
@@ -368,6 +454,7 @@ echo "🔒 Securing firewall with UFW..."
 ufw --force enable || true
 ufw allow OpenSSH
 ufw allow 'Nginx Full'
+ufw allow 5050/tcp
 ufw allow 8085/tcp
 ufw status verbose
 
@@ -382,10 +469,11 @@ fi
 
 echo "=========================================================="
 echo "🎉 DEPLOYMENT COMPLETE!"
-echo "Customer Web App:     http://157.15.203.209/"
-echo "Admin Panel:          http://157.15.203.209/admin-panel/"
-echo "API Endpoint:         http://157.15.203.209/api/"
-echo "Django Admin:         http://157.15.203.209/admin/"
-echo "Database GUI (Adminer): http://157.15.203.209/db-admin/"
-echo "FileBrowser Manager:  http://157.15.203.209:8085"
+echo "Customer Web App:       http://157.15.203.209/"
+echo "Admin Panel:            http://157.15.203.209/admin-panel/"
+echo "API Endpoint:           http://157.15.203.209/api/"
+echo "Django Admin:           http://157.15.203.209/admin/"
+echo "pgAdmin 4 Web GUI:      http://157.15.203.209:5050 (or http://157.15.203.209/pgadmin4/)"
+echo "FileBrowser Manager:    http://157.15.203.209:8085"
+echo "Adminer Web Console:    http://157.15.203.209/db-admin/"
 echo "=========================================================="
