@@ -44,13 +44,46 @@ mysql -e "ALTER USER 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_p
 mysql -e "GRANT ALL PRIVILEGES ON ecommerce_db.* TO 'ecommerce_user'@'127.0.0.1';"
 mysql -e "FLUSH PRIVILEGES;"
 
-# 1.2 Setup Web-based Database Manager (pgAdmin equivalent for browser)
-echo "🖥️ Setting up Web Database Manager (pgAdmin counterpart)..."
-mkdir -p /var/www/ecommerce/db_admin
-curl -fsSL https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1-mysql.php -o /var/www/ecommerce/db_admin/index.php
-chown -R www-data:www-data /var/www/ecommerce/db_admin
-systemctl restart php*-fpm || true
-PHP_SOCK=$(find /run/php/ -name "php*-fpm.sock" 2>/dev/null | head -n 1)
+# 1.2 Setup Adminer (Visual Web Database Manager for MySQL - like pgAdmin)
+echo "🐘 Setting up Adminer (Web Database GUI for MySQL)..."
+mkdir -p /var/www/adminer
+curl -sSL https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php -o /var/www/adminer/index.php
+PHP_SOCK=$(find /run/php/ -name "php*-fpm.sock" 2>/dev/null | head -n 1 || echo "/run/php/php8.1-fpm.sock")
+PHP_SERVICE=$(systemctl list-unit-files | grep -oE "php[0-9.]+-fpm" | head -n 1 || echo "php8.1-fpm")
+systemctl enable "$PHP_SERVICE" || true
+systemctl restart "$PHP_SERVICE" || true
+
+# 1.3 Setup FileBrowser (Web File Manager to view/upload/edit all server files)
+echo "📂 Setting up FileBrowser (Web File Manager)..."
+if ! command -v filebrowser &> /dev/null; then
+    curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+fi
+
+mkdir -p /etc/filebrowser
+if [ ! -f "/etc/filebrowser/filebrowser.db" ]; then
+    filebrowser config init -d /etc/filebrowser/filebrowser.db
+    filebrowser config set -d /etc/filebrowser/filebrowser.db --root /var/www/ecommerce --port 8085 --address 0.0.0.0
+    filebrowser users add admin StyleHubFiles2026! --perm.admin -d /etc/filebrowser/filebrowser.db
+fi
+
+cat << 'EOF' > /etc/systemd/system/filebrowser.service
+[Unit]
+Description=FileBrowser Web File Manager
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/local/bin/filebrowser -d /etc/filebrowser/filebrowser.db
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable filebrowser
+systemctl restart filebrowser
 
 # 2. Install Node.js (v20 LTS) for React Admin Panel
 if ! command -v node &> /dev/null; then
@@ -238,18 +271,33 @@ server {
         add_header Cache-Control "public, max-age=604800";
     }
 
-    # Web Database Manager (Browser-based GUI like pgAdmin)
-    location /db-admin/ {
-        alias /var/www/ecommerce/db_admin/;
+    # Visual Database GUI (Adminer - MySQL Web GUI like pgAdmin)
+    location = /db-admin {
+        return 301 /db-admin/;
+    }
+
+    location ^~ /db-admin/ {
+        alias /var/www/adminer/;
         index index.php;
         try_files $uri $uri/ /db-admin/index.php$is_args$args;
 
         location ~ \.php$ {
-            fastcgi_pass unix:/run/php/php8.1-fpm.sock;
-            fastcgi_index index.php;
             include fastcgi_params;
             fastcgi_param SCRIPT_FILENAME $request_filename;
+            fastcgi_pass unix:__PHP_SOCK__;
         }
+    }
+
+    # FileBrowser Web File Manager
+    location /files/ {
+        proxy_pass http://127.0.0.1:8085/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 
     # React Admin Panel
@@ -276,6 +324,10 @@ server {
 }
 EOF
 
+# Substitute detected PHP-FPM socket into Nginx config
+PHP_SOCK=$(find /run/php/ -name "php*-fpm.sock" 2>/dev/null | head -n 1 || echo "/run/php/php8.1-fpm.sock")
+sed -i "s|__PHP_SOCK__|$PHP_SOCK|g" /etc/nginx/sites-available/ecommerce
+
 # Enable Nginx Site
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/ecommerce /etc/nginx/sites-enabled/ecommerce
@@ -287,6 +339,7 @@ echo "🔒 Securing firewall with UFW..."
 ufw --force enable || true
 ufw allow OpenSSH
 ufw allow 'Nginx Full'
+ufw allow 8085/tcp
 ufw status verbose
 
 # 11. Final Health Check
@@ -300,8 +353,10 @@ fi
 
 echo "=========================================================="
 echo "🎉 DEPLOYMENT COMPLETE!"
-echo "Customer Web App: http://157.15.203.209/"
-echo "Admin Panel:      http://157.15.203.209/admin-panel/"
-echo "API Endpoint:     http://157.15.203.209/api/"
-echo "Django Admin:     http://157.15.203.209/admin/"
+echo "Customer Web App:     http://157.15.203.209/"
+echo "Admin Panel:          http://157.15.203.209/admin-panel/"
+echo "API Endpoint:         http://157.15.203.209/api/"
+echo "Django Admin:         http://157.15.203.209/admin/"
+echo "Database GUI (Adminer): http://157.15.203.209/db-admin/"
+echo "FileBrowser Manager:  http://157.15.203.209:8085"
 echo "=========================================================="
