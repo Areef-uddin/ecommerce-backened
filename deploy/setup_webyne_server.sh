@@ -24,6 +24,8 @@ apt-get install -y \
     mysql-server \
     default-libmysqlclient-dev \
     pkg-config \
+    php-fpm \
+    php-mysql \
     build-essential \
     unzip \
     tar
@@ -41,6 +43,14 @@ mysql -e "CREATE USER IF NOT EXISTS 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH
 mysql -e "ALTER USER 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
 mysql -e "GRANT ALL PRIVILEGES ON ecommerce_db.* TO 'ecommerce_user'@'127.0.0.1';"
 mysql -e "FLUSH PRIVILEGES;"
+
+# 1.2 Setup Web-based Database Manager (pgAdmin equivalent for browser)
+echo "🖥️ Setting up Web Database Manager (pgAdmin counterpart)..."
+mkdir -p /var/www/ecommerce/db_admin
+curl -fsSL https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1-mysql.php -o /var/www/ecommerce/db_admin/index.php
+chown -R www-data:www-data /var/www/ecommerce/db_admin
+systemctl restart php*-fpm || true
+PHP_SOCK=$(find /run/php/ -name "php*-fpm.sock" 2>/dev/null | head -n 1)
 
 # 2. Install Node.js (v20 LTS) for React Admin Panel
 if ! command -v node &> /dev/null; then
@@ -226,6 +236,20 @@ server {
         alias /var/www/ecommerce/backend/media/;
         expires 7d;
         add_header Cache-Control "public, max-age=604800";
+    }
+
+    # Web Database Manager (Browser-based GUI like pgAdmin)
+    location /db-admin/ {
+        alias /var/www/ecommerce/db_admin/;
+        index index.php;
+        try_files $uri $uri/ /db-admin/index.php$is_args$args;
+
+        location ~ \.php$ {
+            fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+            fastcgi_index index.php;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $request_filename;
+        }
     }
 
     # React Admin Panel
