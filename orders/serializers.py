@@ -43,9 +43,6 @@ class TrackingMilestoneSerializer(serializers.ModelSerializer):
 class ShipmentTrackingSerializer(serializers.ModelSerializer):
     milestones = TrackingMilestoneSerializer(many=True, read_only=True)
     delivery_partner = serializers.SerializerMethodField()
-    courier_name = serializers.SerializerMethodField()
-    estimated_delivery = serializers.SerializerMethodField()
-    is_demo_mode = serializers.SerializerMethodField()
 
     class Meta:
         model = ShipmentTracking
@@ -55,26 +52,12 @@ class ShipmentTrackingSerializer(serializers.ModelSerializer):
             'delivery_partner', 'milestones', 'created_at', 'updated_at'
         )
 
-    def get_courier_name(self, obj):
-        name = obj.courier_name or 'StyleHub Express'
-        return name.replace('(Demo Logistics)', '').replace('(Demo)', '').strip()
-
-    def get_is_demo_mode(self, obj):
-        return False
-
-    def get_estimated_delivery(self, obj):
-        if obj.estimated_delivery and obj.estimated_delivery != '31 Oct - 03 Nov':
-            return obj.estimated_delivery
-        from orders.models import compute_estimated_delivery
-        order_dt = obj.order.created_at if hasattr(obj, 'order') and obj.order else None
-        return compute_estimated_delivery(order_dt)
-
     def get_delivery_partner(self, obj):
         return {
-            'name': (obj.delivery_person_name or 'Rahul Kumar').replace('(Demo Partner)', '').strip(),
-            'phone': obj.delivery_person_phone or '+91 9876543210',
-            'rating': float(obj.delivery_partner_rating or 4.8),
-            'vehicle': obj.delivery_vehicle_number or 'KA-01-SH-4421',
+            'name': obj.delivery_person_name,
+            'phone': obj.delivery_person_phone,
+            'rating': float(obj.delivery_partner_rating),
+            'vehicle': obj.delivery_vehicle_number,
         }
 
 
@@ -125,13 +108,6 @@ class OrderSerializer(serializers.ModelSerializer):
         return self._return_deadline(obj)
     tracking_number = serializers.ReadOnlyField()
     shipment = ShipmentTrackingSerializer(read_only=True)
-    estimated_delivery = serializers.SerializerMethodField()
-
-    def get_estimated_delivery(self, obj):
-        if obj.estimated_delivery and obj.estimated_delivery != '31 Oct - 03 Nov':
-            return obj.estimated_delivery
-        from orders.models import compute_estimated_delivery
-        return compute_estimated_delivery(obj.created_at)
 
     class Meta:
         model = Order

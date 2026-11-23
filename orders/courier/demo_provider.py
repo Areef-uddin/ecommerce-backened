@@ -7,12 +7,13 @@ from ..models import (
     TRACKING_STAGES_CONFIG,
     Order,
     OrderTimeline,
-    compute_estimated_delivery,
+    calculate_estimated_delivery,
 )
 
 class DemoCourierProvider(BaseCourierProvider):
     """
-    Standard Logistics Provider powering order tracking and fulfillment milestones.
+    Standard Logistics Fulfillment Provider for StyleHub Luxe E-Commerce.
+    Manages real milestones, carrier dispatch, tracking progression, and delivery audits.
     """
 
     def get_supported_statuses(self):
@@ -22,13 +23,9 @@ class DemoCourierProvider(BaseCourierProvider):
         if order.order_status == 'Placed':
             order.order_status = 'Order Placed'
             order.save(update_fields=['order_status', 'updated_at'])
-        clean_num = str(order.order_number).replace('#', '').strip()
-        tracking_number = f"EXP{clean_num}"
+        tracking_number = f"SH-EXP-{100000 + order.id}"
+        estimated_date = calculate_estimated_delivery(order.created_at)
         
-        dynamic_est = order.estimated_delivery
-        if not dynamic_est or dynamic_est == '31 Oct - 03 Nov':
-            dynamic_est = compute_estimated_delivery(order.created_at)
-
         shipment, created = ShipmentTracking.objects.get_or_create(
             order=order,
             defaults={
@@ -37,7 +34,7 @@ class DemoCourierProvider(BaseCourierProvider):
                 'is_demo_mode': False,
                 'current_status': order.order_status if order.order_status in self.get_supported_statuses() else 'Order Placed',
                 'current_location': 'Bengaluru Fulfillment Center',
-                'estimated_delivery': dynamic_est,
+                'estimated_delivery': order.estimated_delivery if order.estimated_delivery and '31 Oct' not in order.estimated_delivery else estimated_date,
                 'delivery_person_name': order.delivery_partner_name or 'Rahul Kumar',
                 'delivery_person_phone': order.delivery_partner_phone or '+91 9876543210',
                 'delivery_partner_rating': order.delivery_partner_rating or 4.8,
@@ -81,7 +78,7 @@ class DemoCourierProvider(BaseCourierProvider):
 
         return shipment
 
-    def update_status(self, tracking_number: str, new_status: str, location: str = "", note: str = "") -> ShipmentTracking:
+    def update_status(self, tracking_number: str, new_status: str, location: str = "", note: str = "", courier_name: str = "", custom_tracking_number: str = "") -> ShipmentTracking:
         shipment = ShipmentTracking.objects.filter(tracking_number=tracking_number).select_related('order').first()
         if not shipment:
             raise ValueError(f"Shipment with tracking number {tracking_number} not found.")
@@ -94,12 +91,23 @@ class DemoCourierProvider(BaseCourierProvider):
         now = timezone.now()
 
         shipment.current_status = new_status
+        if courier_name:
+            shipment.courier_name = courier_name
+        if custom_tracking_number and custom_tracking_number != shipment.tracking_number:
+            shipment.tracking_number = custom_tracking_number
+
         if location:
             shipment.current_location = location
         else:
             # Default to location of target stage
             stage_cfg = TRACKING_STAGES_CONFIG[target_idx]
             shipment.current_location = stage_cfg['location']
+
+        if new_status == 'Delivered':
+            del_text = f"Delivered on {now.strftime('%d %b %Y')}"
+            shipment.estimated_delivery = del_text
+            shipment.order.estimated_delivery = del_text
+
         shipment.save()
 
         # Update milestones
@@ -153,24 +161,20 @@ class DemoCourierProvider(BaseCourierProvider):
                 'order_index': m.order_index,
             })
 
-        dynamic_est = shipment.estimated_delivery
-        if not dynamic_est or dynamic_est == '31 Oct - 03 Nov':
-            dynamic_est = compute_estimated_delivery(shipment.order.created_at)
-
         return {
             'tracking_number': shipment.tracking_number,
             'order_id': shipment.order.id,
             'order_number': shipment.order.order_number,
-            'courier_name': (shipment.courier_name or 'StyleHub Express').replace('(Demo Logistics)', '').replace('(Demo)', '').strip(),
-            'is_demo_mode': False,
+            'courier_name': shipment.courier_name,
+            'is_demo_mode': shipment.is_demo_mode,
             'current_status': shipment.current_status,
             'current_location': shipment.current_location,
-            'estimated_delivery': dynamic_est,
+            'estimated_delivery': shipment.estimated_delivery,
             'delivery_partner': {
-                'name': (shipment.delivery_person_name or 'Rahul Kumar').replace('(Demo Partner)', '').strip(),
-                'phone': shipment.delivery_person_phone or '+91 9876543210',
-                'rating': float(shipment.delivery_partner_rating or 4.8),
-                'vehicle': shipment.delivery_vehicle_number or 'KA-01-SH-4421',
+                'name': shipment.delivery_person_name,
+                'phone': shipment.delivery_person_phone,
+                'rating': float(shipment.delivery_partner_rating),
+                'vehicle': shipment.delivery_vehicle_number,
             },
             'delivery_address': shipment.order.delivery_address,
             'customer_name': shipment.order.customer_name,

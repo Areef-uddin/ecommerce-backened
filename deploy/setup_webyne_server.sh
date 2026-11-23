@@ -21,10 +21,26 @@ apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
-    libpq-dev \
+    mysql-server \
+    default-libmysqlclient-dev \
+    pkg-config \
     build-essential \
     unzip \
     tar
+
+# 1.1 Setup and Configure Local MySQL Server
+echo "🗄️ Setting up and securing local MySQL Server on VPS..."
+systemctl enable mysql
+systemctl start mysql
+
+mysql -e "CREATE DATABASE IF NOT EXISTS ecommerce_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -e "CREATE USER IF NOT EXISTS 'ecommerce_user'@'localhost' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
+mysql -e "ALTER USER 'ecommerce_user'@'localhost' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
+mysql -e "GRANT ALL PRIVILEGES ON ecommerce_db.* TO 'ecommerce_user'@'localhost';"
+mysql -e "CREATE USER IF NOT EXISTS 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
+mysql -e "ALTER USER 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'StyleHub_MySQL_2026!#$';"
+mysql -e "GRANT ALL PRIVILEGES ON ecommerce_db.* TO 'ecommerce_user'@'127.0.0.1';"
+mysql -e "FLUSH PRIVILEGES;"
 
 # 2. Install Node.js (v20 LTS) for React Admin Panel
 if ! command -v node &> /dev/null; then
@@ -89,15 +105,19 @@ fi
 
 /var/www/ecommerce/backend/venv/bin/pip install --upgrade pip
 /var/www/ecommerce/backend/venv/bin/pip install -r requirements.txt
-/var/www/ecommerce/backend/venv/bin/pip install gunicorn pillow psycopg2-binary
+/var/www/ecommerce/backend/venv/bin/pip install gunicorn pillow pymysql mysqlclient
 
-# Create or Update .env with verified production credentials
-echo "📝 Writing production .env for Backend..."
+# Create or Update .env with verified production credentials (Local MySQL)
+echo "📝 Writing production .env for Backend (Local MySQL)..."
 cat << 'EOF' > /var/www/ecommerce/backend/.env
 DEBUG=False
 SECRET_KEY=django-insecure-pro-ecom-webyne-vps-secure-key-2026!@#$%^
 ALLOWED_HOSTS=157.15.203.209,localhost,127.0.0.1
-DATABASE_URL=postgresql://neondb_owner:npg_THJfOw3sWN8v@ep-muddy-recipe-b4aa0hey-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require
+DB_NAME=ecommerce_db
+DB_USER=ecommerce_user
+DB_PASSWORD=StyleHub_MySQL_2026!#$
+DB_HOST=127.0.0.1
+DB_PORT=3306
 CORS_ALLOW_ALL=True
 FRONTEND_URL=http://157.15.203.209
 TRYON_PROVIDER=auto
@@ -209,6 +229,10 @@ server {
     }
 
     # React Admin Panel
+    location = /admin-panel {
+        return 301 /admin-panel/;
+    }
+
     location ^~ /admin-panel/ {
         alias /var/www/ecommerce/admin_panel/dist/;
         index index.html;

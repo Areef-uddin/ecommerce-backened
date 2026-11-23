@@ -1,7 +1,5 @@
 from django.db import models
 from django.conf import settings
-from django.utils import timezone
-from datetime import timedelta
 from products.models import Product
 import random
 import string
@@ -10,13 +8,12 @@ def generate_order_number():
     random_str = ''.join(random.choices(string.digits, k=8))
     return f"#SH{random_str}"
 
-def compute_estimated_delivery(dt=None):
-    if not dt:
-        dt = timezone.now()
-    d1 = dt + timedelta(days=3)
-    d2 = dt + timedelta(days=5)
-    if d1.month == d2.month:
-        return f"{d1.strftime('%d')} - {d2.strftime('%d %b')}"
+def calculate_estimated_delivery(from_time=None):
+    from datetime import timedelta
+    from django.utils import timezone
+    base = from_time or timezone.now()
+    d1 = base + timedelta(days=3)
+    d2 = base + timedelta(days=5)
     return f"{d1.strftime('%d %b')} - {d2.strftime('%d %b')}"
 
 class CartItem(models.Model):
@@ -98,19 +95,14 @@ class Order(models.Model):
     delivery_partner_name = models.CharField(max_length=100, default='Rahul Kumar')
     delivery_partner_phone = models.CharField(max_length=20, default='+91 9876543210')
     delivery_partner_rating = models.DecimalField(max_digits=3, decimal_places=1, default=4.8)
-    delivery_partner_vehicle = models.CharField(max_length=30, default='KA-01-SH-4421')
-    estimated_delivery = models.CharField(max_length=100, blank=True)
+    delivery_partner_vehicle = models.CharField(max_length=30, default='TB1234')
+    estimated_delivery = models.CharField(max_length=100, default='3-5 Business Days')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
-
-    def save(self, *args, **kwargs):
-        if not self.estimated_delivery or self.estimated_delivery == '31 Oct - 03 Nov':
-            self.estimated_delivery = compute_estimated_delivery(self.created_at if self.id else None)
-        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.order_number} - {self.user.email} ({self.order_status})"
@@ -122,8 +114,7 @@ class Order(models.Model):
                 return self.shipment.tracking_number
         except Exception:
             pass
-        clean_num = str(self.order_number).replace('#', '').strip()
-        return f"EXP{clean_num}"
+        return f"SH-EXP-{100000 + self.id}"
 
 
 class OrderItem(models.Model):
@@ -253,24 +244,18 @@ class ShipmentTracking(models.Model):
     is_demo_mode = models.BooleanField(default=False)
     current_status = models.CharField(max_length=50, default='Order Placed')
     current_location = models.CharField(max_length=200, default='Bengaluru Fulfillment Center')
-    estimated_delivery = models.CharField(max_length=100, blank=True)
+    estimated_delivery = models.CharField(max_length=100, default='3-5 Business Days')
 
     delivery_person_name = models.CharField(max_length=100, default='Rahul Kumar')
     delivery_person_phone = models.CharField(max_length=20, default='+91 9876543210')
     delivery_partner_rating = models.DecimalField(max_digits=3, decimal_places=1, default=4.8)
-    delivery_vehicle_number = models.CharField(max_length=30, default='KA-01-SH-4421')
+    delivery_vehicle_number = models.CharField(max_length=30, default='KA-01-EXP-2024')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
-
-    def save(self, *args, **kwargs):
-        if not self.estimated_delivery or self.estimated_delivery == '31 Oct - 03 Nov':
-            order_dt = self.order.created_at if hasattr(self, 'order') and self.order else None
-            self.estimated_delivery = compute_estimated_delivery(order_dt)
-        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.tracking_number} -> {self.order.order_number} ({self.current_status})"

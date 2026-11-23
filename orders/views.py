@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db import transaction
 import razorpay
 from common.models import Notification
-from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ReturnTimeline, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG, compute_estimated_delivery
+from .models import CartItem, Coupon, Order, OrderItem, OrderTimeline, ReturnRequest, ReturnTimeline, ShipmentTracking, TrackingMilestone, TRACKING_STAGES_CONFIG, calculate_estimated_delivery
 from .serializers import CartItemSerializer, OrderSerializer, ReturnRequestSerializer, ShipmentTrackingSerializer
 from .courier import get_courier_provider
 from products.models import Product
@@ -284,7 +284,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             discount_amount=discount_amount,
             delivery_charges=delivery_charges,
             total_amount=total_amount,
-            estimated_delivery=compute_estimated_delivery()
+            estimated_delivery=calculate_estimated_delivery()
         )
 
         # Create Order Items
@@ -508,7 +508,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             discount_amount=discount_amount,
             delivery_charges=delivery_charges,
             total_amount=total_amount,
-            estimated_delivery=compute_estimated_delivery()
+            estimated_delivery=calculate_estimated_delivery()
         )
 
         for ci in cart_items:
@@ -713,12 +713,15 @@ class OrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
     def update_status(self, request, pk=None):
         """
-        Admin status update endpoint. Synchronizes Order and ShipmentTracking milestones.
+        Enterprise Order Fulfillment & Tracking API.
+        Synchronizes Order, ShipmentTracking, TrackingMilestones, and Customer Notifications.
         """
         order = self.get_object()
         new_status = request.data.get('status')
         location = request.data.get('location', '')
         note = request.data.get('note', '')
+        courier_name = request.data.get('courier_name', '')
+        custom_tracking_number = request.data.get('tracking_number', '')
 
         if not new_status:
             return Response({'detail': 'status is required'}, status=status.HTTP_400_BAD_REQUEST)
@@ -740,24 +743,41 @@ class OrderViewSet(viewsets.ModelViewSet):
                 order.shipment.tracking_number,
                 mapped_status,
                 location=location,
-                note=note
+                note=note,
+                courier_name=courier_name,
+                custom_tracking_number=custom_tracking_number,
             )
         except ValueError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         order.refresh_from_db()
+
+        # Send push/in-app notification to customer
+        try:
+            from common.models import Notification
+            notify_loc = f" at {location}" if location else ""
+            Notification.objects.create(
+                user=order.user,
+                title=f"Order Update: {mapped_status}",
+                message=f"Order #{order.order_number} is now {mapped_status}{notify_loc}.",
+                category='orders',
+                icon='truck'
+            )
+        except Exception:
+            pass
+
         return Response({
-            'message': f'Status updated to {mapped_status}',
+            'message': f'Fulfillment status updated to {mapped_status}',
             'order': self.get_serializer(order).data,
             'tracking': provider.get_tracking_info(shipment.tracking_number)
         })
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    def update_fulfillment(self, request, pk=None):
+        return self.update_status(request, pk=pk)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
     def simulate_tracking(self, request, pk=None):
-        """
-        DEMO TRACKING Simulation endpoint.
-        Allows authorized admin to simulate status changes with custom locations and notes.
-        """
         return self.update_status(request, pk=pk)
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
