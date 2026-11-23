@@ -44,12 +44,21 @@ echo "🐘 Setting up and securing local PostgreSQL Server on VPS..."
 systemctl enable postgresql
 systemctl start postgresql
 
+# Avoid permission denied when running psql as postgres from /root
+cd /tmp
+
 sudo -u postgres psql -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'ecommerce_user') THEN CREATE ROLE ecommerce_user WITH LOGIN PASSWORD 'StyleHub_Postgres_2026!#$'; END IF; END \$\$;"
 sudo -u postgres psql -c "ALTER ROLE ecommerce_user WITH LOGIN PASSWORD 'StyleHub_Postgres_2026!#$';"
-sudo -u postgres psql -c "SELECT 'CREATE DATABASE ecommerce_db OWNER ecommerce_user' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ecommerce_db')\gexec"
+
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='ecommerce_db'" | grep -q 1; then
+    sudo -u postgres psql -c "CREATE DATABASE ecommerce_db OWNER ecommerce_user;"
+fi
+
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ecommerce_db TO ecommerce_user;"
 sudo -u postgres psql -d ecommerce_db -c "GRANT ALL ON SCHEMA public TO ecommerce_user;"
 sudo -u postgres psql -d ecommerce_db -c "ALTER SCHEMA public OWNER TO ecommerce_user;"
+
+cd /var/www/ecommerce
 
 # 1.2 Setup Official pgAdmin 4 Web GUI
 echo "🐘 Setting up official pgAdmin 4 Web GUI..."
@@ -89,11 +98,9 @@ cat << 'EOF' > /etc/pgadmin/servers.json
 EOF
 
 # Initialize pgAdmin 4 admin user non-interactively
-/usr/pgadmin4/venv/bin/python3 /usr/pgadmin4/web/setup.py --load-servers /etc/pgadmin/servers.json << 'EOF' 2>/dev/null || true
-admin@stylehub.com
-StyleHubPgAdmin2026!#$
-StyleHubPgAdmin2026!#$
-EOF
+export PGADMIN_SETUP_EMAIL="admin@stylehub.com"
+export PGADMIN_SETUP_PASSWORD="StyleHubPgAdmin2026!#$"
+/usr/pgadmin4/venv/bin/python3 /usr/pgadmin4/web/setup.py --load-servers /etc/pgadmin/servers.json 2>/dev/null || true
 
 chown -R www-data:www-data /var/lib/pgadmin /var/log/pgadmin 2>/dev/null || true
 
