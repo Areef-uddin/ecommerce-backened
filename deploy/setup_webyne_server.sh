@@ -44,10 +44,34 @@ mysql -e "ALTER USER 'ecommerce_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_p
 mysql -e "GRANT ALL PRIVILEGES ON ecommerce_db.* TO 'ecommerce_user'@'127.0.0.1';"
 mysql -e "FLUSH PRIVILEGES;"
 
-# 1.2 Setup Adminer (Visual Web Database Manager for MySQL - like pgAdmin)
+# 1.2 Setup Adminer (Visual Web Database Manager for MySQL - like pgAdmin with 1-click Auto-Login)
 echo "🐘 Setting up Adminer (Web Database GUI for MySQL)..."
 mkdir -p /var/www/adminer
-curl -sSL https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php -o /var/www/adminer/index.php
+curl -sSL https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php -o /var/www/adminer/adminer-core.php
+
+cat << 'EOF' > /var/www/adminer/index.php
+<?php
+function adminer_object() {
+    class AdminerSoftware extends Adminer {
+        function name() {
+            return 'StyleHub MySQL Console';
+        }
+        function credentials() {
+            return array('localhost', 'ecommerce_user', 'StyleHub_MySQL_2026!#$');
+        }
+        function database() {
+            return 'ecommerce_db';
+        }
+        function login($login, $password) {
+            return true;
+        }
+    }
+    return new AdminerSoftware;
+}
+include './adminer-core.php';
+EOF
+chmod 644 /var/www/adminer/index.php /var/www/adminer/adminer-core.php
+
 PHP_SOCK=$(find /run/php/ -name "php*-fpm.sock" 2>/dev/null | head -n 1 || echo "/run/php/php8.1-fpm.sock")
 PHP_SERVICE=$(systemctl list-unit-files | grep -oE "php[0-9.]+-fpm" | head -n 1 || echo "php8.1-fpm")
 systemctl enable "$PHP_SERVICE" || true
@@ -58,6 +82,7 @@ grep -q "127.0.0.1.*localhost" /etc/hosts || echo "127.0.0.1 localhost" >> /etc/
 
 # 1.3 Setup FileBrowser (Web File Manager to view/upload/edit all server files)
 echo "📂 Setting up FileBrowser (Web File Manager)..."
+systemctl stop filebrowser 2>/dev/null || true
 if ! command -v filebrowser &> /dev/null; then
     curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 fi
